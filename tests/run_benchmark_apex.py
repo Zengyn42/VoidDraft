@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run a benchmark task with ApexCoder. Usage: python3 run_benchmark_apex.py <task_name>"""
 
+import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -38,7 +39,7 @@ async def main():
     # Append working directory hint for the splitter node
     task_text = task_desc + f"\n## 工作目录: {working_dir}\n"
 
-    import blueprints.functional_graphs.apex_coder.state  # noqa: F401
+    import functional_graphs.apex_coder.state  # noqa: F401
 
     loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder"))
     graph = await loader.build_graph(checkpointer=None)

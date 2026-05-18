@@ -116,7 +116,7 @@ def test_awaken_arg_parsing():
     entity_path = str(_Path.home() / "Foundation" / "EdenGateway" / "agents" / "hani")
     orig = sys.argv[:]
     sys.argv = ["awaken.py", "--entity", entity_path, "--connector", "cli"]
-    spec = importlib.util.spec_from_file_location("awaken", "awaken.py")
+    spec = importlib.util.spec_from_file_location("awaken", "/home/kingy/Foundation/ZenithLoom/awaken.py")
     awk_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(awk_mod)
     entity_p, connector, debug, _debug_output = awk_mod._parse_args()

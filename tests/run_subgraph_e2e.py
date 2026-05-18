@@ -5,6 +5,7 @@
 每个子图用简单 prompt 跑一轮完整流程，验证 permission_mode 和 schema 重构后一切正常。
 """
 
+import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys

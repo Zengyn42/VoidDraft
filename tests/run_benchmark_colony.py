@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run a benchmark task with ColonyCoder. Usage: python3 run_benchmark_colony.py <task_name>"""
 
+import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -16,7 +17,7 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+import functional_graphs.colony_coder.state  # noqa: F401
 
 from benchmark_tasks import TASKS
 from framework.loader import EntityLoader

@@ -27,7 +27,7 @@ load_dotenv()
 logging.basicConfig(level=logging.WARNING, stream=sys.stdout)
 
 # ── Must import before any graph building to register "colony_coder_schema" ──
-import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+import functional_graphs.colony_coder.state  # noqa: F401
 
 from framework.loader import EntityLoader
 from framework.nodes.llm.claude import ClaudeSDKNode
@@ -318,7 +318,7 @@ async def test_e2e_colony_coder_game(tmp_path):
 @pytest.mark.asyncio
 async def test_planner_decomposition_validator_rejects_empty():
     """Planner validator rejects empty tasks and retries task_decompose."""
-    from blueprints.functional_graphs.colony_coder_planner.validators import (
+    from functional_graphs.colony_coder_planner.validators import (
         decomposition_validator,
     )
 
@@ -336,7 +336,7 @@ async def test_planner_decomposition_validator_rejects_empty():
 @pytest.mark.asyncio
 async def test_planner_decomposition_validator_accepts_valid():
     """Planner validator accepts valid decomposition."""
-    from blueprints.functional_graphs.colony_coder_planner.validators import (
+    from functional_graphs.colony_coder_planner.validators import (
         decomposition_validator,
     )
 
@@ -351,7 +351,7 @@ async def test_planner_decomposition_validator_accepts_valid():
 @pytest.mark.asyncio
 async def test_executor_new_validators():
     """Executor validators: inject_task_context, test_route."""
-    from blueprints.functional_graphs.colony_coder_executor.validators import (
+    from functional_graphs.colony_coder_executor.validators import (
         inject_task_context, test_route,
     )
     ctx = inject_task_context({
@@ -380,7 +380,7 @@ async def test_executor_new_validators():
 @pytest.mark.asyncio
 async def test_integrator_route_pass():
     """Integrator route: pass → __end__ with success."""
-    from blueprints.functional_graphs.colony_coder_integrator.validators import (
+    from functional_graphs.colony_coder_integrator.validators import (
         integration_route,
     )
 
@@ -395,7 +395,7 @@ async def test_integrator_route_pass():
 @pytest.mark.asyncio
 async def test_integrator_route_fail_retry():
     """Integrator route: fail → rescue then retry."""
-    from blueprints.functional_graphs.colony_coder_integrator.validators import (
+    from functional_graphs.colony_coder_integrator.validators import (
         integration_route,
     )
 

@@ -5,7 +5,7 @@ import tempfile
 
 
 def test_apex_coder_schema_registered():
-    import blueprints.functional_graphs.apex_coder.state  # noqa: F401
+    import functional_graphs.apex_coder.state  # noqa: F401
     from framework.registry import get_all_schemas
     schemas = get_all_schemas()
     assert "apex_coder_schema" in schemas
@@ -13,7 +13,7 @@ def test_apex_coder_schema_registered():
 
 def test_apex_coder_schema_has_required_fields():
     import typing
-    from blueprints.functional_graphs.apex_coder.state import ApexCoderState
+    from functional_graphs.apex_coder.state import ApexCoderState
     hints = typing.get_type_hints(ApexCoderState, include_extras=True)
     for field in ("user_requirements", "working_directory", "qa_bypass",
                   "qa_tests_dir", "run_qa_script", "qa_summary", "apex_conclusion"):
@@ -21,7 +21,7 @@ def test_apex_coder_schema_has_required_fields():
 
 
 def test_setup_text_input():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({
         "messages": [HumanMessage(content="Build a snake game\n\n## 工作目录: /tmp/test_splitter_apex")]
     })
@@ -32,7 +32,7 @@ def test_setup_text_input():
 
 
 def test_setup_file_input():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write("Build a todo app")
         f.flush()
@@ -42,7 +42,7 @@ def test_setup_file_input():
 
 
 def test_setup_auto_generates_working_dir():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({"messages": [HumanMessage(content="Build something")]})
     assert result["working_directory"].startswith("/tmp/apex_")
     assert Path(result["working_directory"]).exists()
@@ -50,7 +50,7 @@ def test_setup_auto_generates_working_dir():
 
 
 def test_setup_creates_directories():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({
         "messages": [HumanMessage(content="Task\n\n## 工作目录: /tmp/test_splitter_dirs")]
     })
@@ -58,7 +58,7 @@ def test_setup_creates_directories():
 
 
 def test_reset_for_coder_clears_qa_messages():
-    from blueprints.functional_graphs.apex_coder.validators import reset_for_coder
+    from functional_graphs.apex_coder.validators import reset_for_coder
     result = reset_for_coder({
         "messages": [
             HumanMessage(content="user task", id="h1"),
@@ -77,7 +77,7 @@ def test_reset_for_coder_clears_qa_messages():
 
 
 def test_reset_for_coder_bypass_mode():
-    from blueprints.functional_graphs.apex_coder.validators import reset_for_coder
+    from functional_graphs.apex_coder.validators import reset_for_coder
     result = reset_for_coder({
         "messages": [HumanMessage(content="task", id="h1")],
         "user_requirements": "simple task",
@@ -134,7 +134,7 @@ def test_hook_allows_unit_test_write():
 
 @pytest.mark.asyncio
 async def test_apex_coder_graph_compiles():
-    import blueprints.functional_graphs.apex_coder.state  # noqa: F401
+    import functional_graphs.apex_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder")).build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__", "__end__"}
@@ -144,7 +144,7 @@ async def test_apex_coder_graph_compiles():
 
 def test_state_has_executor_fields():
     import typing
-    from blueprints.functional_graphs.apex_coder.state import ApexCoderState
+    from functional_graphs.apex_coder.state import ApexCoderState
     hints = typing.get_type_hints(ApexCoderState, include_extras=True)
     for field in ("execution_stdout", "execution_stderr", "execution_returncode",
                   "iteration_history", "status"):
@@ -152,14 +152,14 @@ def test_state_has_executor_fields():
 
 
 def test_executor_bypass():
-    from blueprints.functional_graphs.apex_coder.validators import executor
+    from functional_graphs.apex_coder.validators import executor
     result = executor({"qa_bypass": True, "working_directory": "/tmp", "run_qa_script": ""})
     assert result["status"] == "PASS"
     assert result["execution_returncode"] == 0
 
 
 def test_executor_missing_script():
-    from blueprints.functional_graphs.apex_coder.validators import executor
+    from functional_graphs.apex_coder.validators import executor
     result = executor({
         "qa_bypass": False,
         "working_directory": "/tmp",
@@ -170,35 +170,35 @@ def test_executor_missing_script():
 
 
 def test_route_pass():
-    from blueprints.functional_graphs.apex_coder.validators import route
+    from functional_graphs.apex_coder.validators import route
     result = route({"status": "PASS", "retry_count": 0})
     assert result["routing_target"] == "__end__"
     assert result["status"] == "PASS"
 
 
 def test_route_fail_retry():
-    from blueprints.functional_graphs.apex_coder.validators import route
+    from functional_graphs.apex_coder.validators import route
     result = route({"status": "FAIL", "retry_count": 0})
     assert result["routing_target"] == "inject_error_context"
     assert result["retry_count"] == 1
 
 
 def test_route_fail_exhausted():
-    from blueprints.functional_graphs.apex_coder.validators import route
+    from functional_graphs.apex_coder.validators import route
     result = route({"status": "FAIL", "retry_count": 4})
     assert result["routing_target"] == "__end__"
     assert result["status"] == "FAIL"
 
 
 def test_route_pending_aborts():
-    from blueprints.functional_graphs.apex_coder.validators import route
+    from functional_graphs.apex_coder.validators import route
     result = route({"retry_count": 0})  # no status field at all
     assert result["routing_target"] == "__end__"
     assert result["status"] == "FAIL"
 
 
 def test_inject_error_context_builds_retry_prompt():
-    from blueprints.functional_graphs.apex_coder.validators import inject_error_context
+    from functional_graphs.apex_coder.validators import inject_error_context
     result = inject_error_context({
         "messages": [HumanMessage(content="old", id="h1")],
         "user_requirements": "build a game",
@@ -219,7 +219,7 @@ def test_inject_error_context_builds_retry_prompt():
 
 
 def test_inject_error_context_includes_history():
-    from blueprints.functional_graphs.apex_coder.validators import inject_error_context
+    from functional_graphs.apex_coder.validators import inject_error_context
     result = inject_error_context({
         "messages": [HumanMessage(content="old", id="h1")],
         "user_requirements": "task",
@@ -237,7 +237,7 @@ def test_inject_error_context_includes_history():
 
 
 def test_setup_reads_refined_plan():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({
         "messages": [HumanMessage(content="Build a game")],
         "refined_plan": "Use MVC pattern with curses UI",
@@ -251,7 +251,7 @@ def test_setup_reads_refined_plan():
 
 
 def test_setup_reads_debate_conclusion():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({
         "messages": [HumanMessage(content="Build a game")],
         "debate_conclusion": "Use event-driven architecture",
@@ -263,7 +263,7 @@ def test_setup_reads_debate_conclusion():
 
 
 def test_setup_routing_context_priority():
-    from blueprints.functional_graphs.apex_coder.validators import setup
+    from functional_graphs.apex_coder.validators import setup
     result = setup({
         "messages": [HumanMessage(content="ignored message")],
         "routing_context": "Build a CLI tool\n\n## 工作目录: /tmp/test_routing_ctx",

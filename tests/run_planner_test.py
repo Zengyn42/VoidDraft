@@ -9,6 +9,7 @@
   4. Token guard 不误杀
 """
 
+import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -25,7 +26,7 @@ logging.basicConfig(
 )
 
 # 注册 state schema
-import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+import functional_graphs.colony_coder.state  # noqa: F401
 
 from framework.loader import EntityLoader
 from framework.debug import set_debug, push_graph_scope, pop_graph_scope

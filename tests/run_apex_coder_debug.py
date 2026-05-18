@@ -7,6 +7,7 @@ ApexCoder TDD pipeline: splitter → ClaudeQA → reset_for_coder → ClaudeCode
 用法: python3 run_apex_coder_debug.py
 """
 
+import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import blueprints.functional_graphs.apex_coder.state  # noqa: F401
+import functional_graphs.apex_coder.state  # noqa: F401
 
 logging.basicConfig(
     level=logging.INFO,

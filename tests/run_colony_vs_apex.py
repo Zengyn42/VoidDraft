@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 
 # Register state schema
-import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+import functional_graphs.colony_coder.state  # noqa: F401
 
 from framework.loader import EntityLoader
 from framework.debug import set_debug

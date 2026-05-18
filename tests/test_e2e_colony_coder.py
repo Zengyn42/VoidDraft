@@ -29,7 +29,7 @@ def _ollama_tool_call(name: str, args: dict) -> dict:
 @pytest.mark.asyncio
 async def test_decomposition_validator_flow():
     """Planner validator routing: valid state → __end__ (exits planner subgraph)."""
-    from blueprints.functional_graphs.colony_coder_planner.validators import decomposition_validator
+    from functional_graphs.colony_coder_planner.validators import decomposition_validator
     result = decomposition_validator({
         "tasks": [{"id": "t1", "description": "hello", "dependencies": []}],
         "execution_order": ["t1"],
@@ -41,7 +41,7 @@ async def test_decomposition_validator_flow():
 @pytest.mark.asyncio
 async def test_executor_inject_and_route_flow():
     """Executor: inject_task_context builds prompt, test_route routes pass/fail."""
-    from blueprints.functional_graphs.colony_coder_executor.validators import (
+    from functional_graphs.colony_coder_executor.validators import (
         inject_task_context, test_route,
     )
     ctx = inject_task_context({
@@ -70,7 +70,7 @@ async def test_executor_inject_and_route_flow():
 
 @pytest.mark.asyncio
 async def test_planner_graph_compiles_e2e():
-    import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+    import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_planner")).build_graph(checkpointer=None)
     assert set(g.nodes) - {"__start__"} >= {
@@ -80,7 +80,7 @@ async def test_planner_graph_compiles_e2e():
 
 @pytest.mark.asyncio
 async def test_executor_graph_compiles_e2e():
-    import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+    import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_executor")).build_graph(checkpointer=None)
     assert set(g.nodes) - {"__start__"} >= {
@@ -90,7 +90,7 @@ async def test_executor_graph_compiles_e2e():
 
 @pytest.mark.asyncio
 async def test_integrator_graph_compiles_e2e():
-    import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+    import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_integrator")).build_graph(checkpointer=None)
     assert set(g.nodes) - {"__start__"} >= {
@@ -100,7 +100,7 @@ async def test_integrator_graph_compiles_e2e():
 
 @pytest.mark.asyncio
 async def test_master_graph_compiles_e2e():
-    import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+    import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder")).build_graph(checkpointer=None)
     assert set(g.nodes) - {"__start__"} >= {"plan", "execute", "qa"}

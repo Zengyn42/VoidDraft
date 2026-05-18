@@ -191,7 +191,7 @@ def test_print_summary(capsys):
 @pytest.mark.asyncio
 async def test_colony_coder_graph_with_subgraphs_true():
     """Verify colony_coder graph compiles with native subgraphs."""
-    import blueprints.functional_graphs.colony_coder.state  # noqa: F401
+    import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
 
     loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
