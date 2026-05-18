@@ -28,14 +28,84 @@ import logging
 from pathlib import Path
 
 framework_dir = Path(__file__).parent.parent.parent / "ZenithLoom"
+prismrag_dir  = Path(__file__).parent.parent.parent / "PrismRag"
 os.chdir(framework_dir)
 sys.path.insert(0, str(framework_dir))
+sys.path.insert(0, str(prismrag_dir))
 
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 from framework.loader import EntityLoader
+
+# ── T7 setup/teardown: real pending edge via EdgeClassifier pipeline ───────────
+
+_FAKE_BRIDGE = {
+    "source_ns": "code",
+    "source_id": "prism_rag/retrieve/hybrid.py::hybrid_search",
+    "target_ns": "nimbus",
+    "target_id": "设计细节/PrismRag v5.4 — Atomize 体验精打磨",
+    "relation": "embedding_similar",
+    "confidence": "INFERRED",
+    # weight=0.80 → above tier2_min_conf(0.75), below tier1_min_conf(0.85)
+    # consecutive_seen=1 → doesn't meet tier1_min_consecutive(2) → stays Tier 2 → PENDING
+    "weight": 0.80,
+}
+
+
+def _setup_pending_edge() -> str | None:
+    """Inject a real Tier-2 pending edge into inbox.jsonl via EdgeClassifier pipeline.
+
+    Returns the original inbox.jsonl content (or None if file didn't exist) for teardown.
+    """
+    from prism_rag.config import PrismRagSettings, get_classifier_profile
+    from prism_rag.inbox.store import InboxStore
+    from prism_rag.ingest.edge_classifier import classify_and_route
+    from prism_rag.store.cross_namespace_probe import CrossNamespaceProbe
+    from prism_rag.store.federated import FederatedGraph
+
+    settings   = PrismRagSettings()
+    nimbus_src = next(s for s in settings.resolved_graphs if s.namespace == "nimbus")
+    inbox_path = nimbus_src.data_dir / "inbox.jsonl"
+
+    # Back up original content
+    original = inbox_path.read_text(encoding="utf-8") if inbox_path.exists() else None
+
+    # Build in-memory probe with one synthetic Tier-2 bridge
+    probe = CrossNamespaceProbe(log_path=None)
+    scan_ts = "2026-05-18T00:00:00+00:00"
+    probe.record(_FAKE_BRIDGE, scan_timestamp=scan_ts)
+
+    # Run the real EdgeClassifier (classify_and_route) — writes to inbox.jsonl
+    fg         = FederatedGraph.load(settings.resolved_graphs)
+    inbox      = InboxStore(inbox_path)
+    model_id   = getattr(settings, "embedding_model", "default")
+    profile    = get_classifier_profile(settings, model_id)
+    report     = classify_and_route(fg, probe, inbox, nimbus_src, profile)
+    inbox.save_atomic()
+
+    print(
+        f"[T7-setup] EdgeClassifier: promoted={report.promoted} "
+        f"queued={report.queued} discarded={report.discarded}",
+        flush=True,
+    )
+    return original
+
+
+def _teardown_pending_edge(original: str | None) -> None:
+    """Restore inbox.jsonl to its pre-test state."""
+    from prism_rag.config import PrismRagSettings
+    settings   = PrismRagSettings()
+    nimbus_src = next(s for s in settings.resolved_graphs if s.namespace == "nimbus")
+    inbox_path = nimbus_src.data_dir / "inbox.jsonl"
+
+    if original is None:
+        inbox_path.unlink(missing_ok=True)
+        print("[T7-teardown] inbox.jsonl removed (was absent before test)", flush=True)
+    else:
+        inbox_path.write_text(original, encoding="utf-8")
+        print("[T7-teardown] inbox.jsonl restored", flush=True)
 
 BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
 DATA_DIR      = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
@@ -112,15 +182,16 @@ TESTS = [
     # ── T7: pending_edges review ──────────────────────────────────────────────
     {
         "tag": "T7",
-        "label": "pending_edges — list unconfirmed edge proposals",
+        "label": "pending_edges — real Tier-2 edge injected via EdgeClassifier",
         "question": "知识图谱里有没有待确认的关系（pending edges）？列出前 5 条，并说明每条关系的 source 和 target。",
-        # Tool may return empty list (valid). Accept any outcome that shows tool was called:
-        # either structured results OR an explicit "no pending edges" message.
-        # We check tool reachability only — no structural keywords required when queue is empty.
-        "pass_keywords": [],   # empty = always PASS as long as no fail_keywords triggered
-        "fail_keywords": ["工具不可用", "tool not found", "执行失败", "error"],
+        # Setup injects a real Tier-2 entry: source=nimbus::v5.4, target=code::hybrid_search
+        # Jei must call pending_edges tool and surface source/target fields from the JSON.
+        "pass_keywords": ["nimbus", "hybrid_search"],
+        "fail_keywords": ["工具不可用", "tool not found", "执行失败", "没有待确认", "队列.*空", "inbox.*empty"],
         "layer": "agent",
-        "note": "Verifies pending_edges tool is accessible. Empty queue is a valid result.",
+        "note": "Setup injects real pending edge (confidence=0.80, Tier-2) via EdgeClassifier. Verifies Jei surfaces source and target fields.",
+        "setup":    _setup_pending_edge,
+        "teardown": _teardown_pending_edge,
     },
 ]
 
@@ -192,6 +263,16 @@ async def run_tests():
         print(f"{sep}")
         print("RESPONSE:")
 
+        # ── setUp hook ───────────────────────────────────────────────────────
+        setup_state = None
+        if "setup" in test:
+            try:
+                setup_state = test["setup"]()
+            except Exception as e:
+                import traceback
+                print(f"[SETUP ERROR] {e}")
+                traceback.print_exc()
+
         try:
             response = await asyncio.wait_for(
                 controller.run(q),
@@ -214,6 +295,13 @@ async def run_tests():
             traceback.print_exc()
             response = ""
             stream   = ""
+        finally:
+            # ── tearDown hook ─────────────────────────────────────────────────
+            if "teardown" in test:
+                try:
+                    test["teardown"](setup_state)
+                except Exception as e:
+                    print(f"[TEARDOWN ERROR] {e}")
 
         stream = "".join(_stream_buf)
         status, failures = _assess(response, stream, test)
