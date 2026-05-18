@@ -71,13 +71,13 @@ TESTS = [
         "tag": "S2-A",
         "label": "P2 System layer — search_knowledge returns soft hint for KNOW-ID",
         "question": "KNOW-000032 的内容是什么？",
-        # Layer A: hint keywords should appear in stream (tool output visible to Jei)
-        # We look for them in the combined stream output
-        "pass_keywords": ["⚠️", "未执行搜索", "explain_node"],
+        # Layer A: Jei's response should mention explain_node (evidence the hint was received).
+        # Note: ⚠️ / 未执行搜索 are in MCP tool_result, not LLM stream — can't check directly.
+        "pass_keywords": ["explain_node"],
         "fail_keywords": [],
         "layer": "system",
-        "note": "Verifies MCP soft hint is returned (System layer). "
-                "If WARN: hint not visible in stream but agent layer may still pass.",
+        "note": "Verifies soft hint caused Jei to call explain_node (evidenced in response text). "
+                "If WARN: Jei received hint but didn't mention explain_node in its reply.",
     },
     {
         "tag": "S2-B",
