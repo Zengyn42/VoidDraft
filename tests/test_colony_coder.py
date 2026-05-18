@@ -231,8 +231,8 @@ def test_inject_task_context_basic():
     assert "messages" in result
     assert result["retry_count"] == 0
     content = result["messages"][0].content
-    assert "Build a game" in content
     assert "t1" in content
+    assert "write code" in content
 
 
 def test_inject_task_context_with_qa_feedback():
@@ -246,7 +246,9 @@ def test_inject_task_context_with_qa_feedback():
         "qa_fail_count": 1,
     })
     content = result["messages"][0].content
-    assert "QA Feedback" in content
+    # When tasks are exhausted and qa_analysis is set, enters fix mode:
+    # heading is "E2E Fix Task (QA re-entry)" with "E2E Test Failures" section
+    assert "E2E" in content
     assert "E2E tests failed" in content
 
 

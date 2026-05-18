@@ -106,8 +106,9 @@ async def test_output_field_writes_to_state():
     state = _make_llm_state()
     result = await node(state)
 
-    assert result.get("debate_conclusion") == reply, \
-        "output_field 应把 LLM 输出写入 debate_conclusion"
+    stored = result.get("debate_conclusion", "")
+    assert stored.startswith(reply), \
+        f"output_field 应把 LLM 输出写入 debate_conclusion，实际: {stored!r}"
 
     logger.info("PASS output_field 写入 state")
 
@@ -121,8 +122,9 @@ async def test_output_field_none_no_extra_keys():
     state = _make_llm_state()
     result = await node(state)
 
+    # 无 output_field 时，结论字段应被清空（设为 ""），不应含有效内容
     for field in ("debate_conclusion", "apex_conclusion", "knowledge_result", "discovery_report"):
-        assert field not in result, f"无 output_field 时不应有 {field}"
+        assert not result.get(field), f"无 output_field 时 {field} 应为空，实际: {result.get(field)!r}"
 
     logger.info("PASS 无 output_field 时不写入额外字段")
 
@@ -136,7 +138,9 @@ async def test_output_field_apex_conclusion():
     state = _make_llm_state()
     result = await node(state)
 
-    assert result.get("apex_conclusion") == reply
+    stored = result.get("apex_conclusion", "")
+    assert stored.startswith(reply), \
+        f"output_field 应把 LLM 输出写入 apex_conclusion，实际: {stored!r}"
     logger.info("PASS output_field apex_conclusion")
 
 

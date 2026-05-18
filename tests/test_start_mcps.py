@@ -86,10 +86,20 @@ class TestStartMcpServers:
         mock_proxy_instance.register = AsyncMock()
         mock_proxy_class = MagicMock(return_value=mock_proxy_instance)
 
+        # Inject an agent_mail spec (entity.json does not define one directly)
+        agent_mail_spec = {
+            "name": "agent_mail",
+            "module": "framework.agent_mail",
+            "url": "http://localhost:9001/sse",
+            "shared": True,
+            "proxy": "agent_mail",
+        }
+
         with patch("framework.mcp_manager.MCPManager.get_instance", return_value=mock_mgr):
-            with patch("framework.loader.entity_loader._resolve_proxy_class", return_value=mock_proxy_class):
-                with patch("framework.loader.entity_loader._register_mcp_tools"):
-                    started = await loader.start_mcp_servers()
+            with patch.object(loader, "_collect_mcp_entries", return_value=[agent_mail_spec]):
+                with patch("framework.loader.entity_loader._resolve_proxy_class", return_value=mock_proxy_class):
+                    with patch("framework.loader.entity_loader._register_mcp_tools"):
+                        started = await loader.start_mcp_servers()
 
         # agent_mail proxy should be stored
         assert "agent_mail" in loader._mcp_proxies

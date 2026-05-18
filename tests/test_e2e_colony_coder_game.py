@@ -245,9 +245,26 @@ async def test_e2e_colony_coder_game(tmp_path):
             # Catch-all for any unexpected CLAUDE_SDK node
             return _base_return(state, f"Mock response for {node_id}")
 
-    # ── 2. OllamaNode mock (executor's code_gen) ─────────────────────────
+    # ── 2. OllamaNode mock (executor's code_gen + QA's generate_e2e) ────
     async def _mock_ollama_call(self, state):
-        # Write game source file
+        node_id = self._node_id
+
+        if node_id == "generate_e2e":
+            # QA: write E2E test scripts that will pass
+            _make_e2e_scripts(tmpdir)
+            # Return a response with a Python code block so write_test_file can extract it
+            return {
+                "messages": [_ai(
+                    "E2E tests written.\n\n"
+                    "```python\n"
+                    "# e2e test placeholder\n"
+                    "def test_placeholder():\n"
+                    "    pass\n"
+                    "```"
+                )],
+            }
+
+        # Default: code_gen — write game source file + unit test scripts
         game_path = Path(tmpdir) / "guess_game.py"
         game_path.write_text(GAME_CODE, encoding="utf-8")
 
@@ -368,13 +385,13 @@ async def test_executor_new_validators():
     tr = test_route({"execution_returncode": 0, "retry_count": 0})
     assert tr["routing_target"] == "__end__"
 
-    # Fail retry
+    # Fail retry (retry_count=1 is below cap of 2, should retry)
     tr = test_route({
-        "execution_returncode": 1, "retry_count": 2,
+        "execution_returncode": 1, "retry_count": 1,
         "execution_stdout": "FAIL", "execution_stderr": "",
     })
     assert tr["routing_target"] == "code_gen"
-    assert tr["retry_count"] == 3
+    assert tr["retry_count"] == 2
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ Nodes (each function = one DETERMINISTIC node):
   e2e_route           — route: pass→__end__ or next qa_task, fail→execute (via parent)
 """
 
+import json
 import logging
 import os
 import re
@@ -428,15 +429,17 @@ def _run_e2e_tests(state: dict, caller: str = "run_e2e") -> dict:
 
             if found_test:
                 # Move to expected location and auto-create run script
-                expected_dir = os.path.dirname(test_file_path)
+                expected_dir = os.path.dirname(test_file_path) if test_file_path else os.path.dirname(found_test)
+                _qa_id = qa_id if qa_tasks else "legacy"
                 try:
                     os.makedirs(expected_dir, exist_ok=True)
                     import shutil
-                    shutil.move(found_test, test_file_path)
-                    logger.info(f"[{caller}] moved test file to: {test_file_path}")
+                    dest = test_file_path if test_file_path else found_test
+                    shutil.move(found_test, dest)
+                    logger.info(f"[{caller}] moved test file to: {dest}")
                     # Create run script
-                    script_path = os.path.join(working_dir, "test_tool", f"run_e2e_{qa_id}.sh")
-                    rel_test = os.path.relpath(test_file_path, working_dir)
+                    script_path = os.path.join(working_dir, "test_tool", f"run_e2e_{_qa_id}.sh")
+                    rel_test = os.path.relpath(dest, working_dir)
                     with open(script_path, "w") as f:
                         f.write(f"#!/bin/bash\nset -e\ncd \"$(dirname \"$0\")/..\"\npython3 -m pytest {rel_test} -v 2>&1\n")
                     os.chmod(script_path, 0o755)
@@ -457,7 +460,7 @@ def _run_e2e_tests(state: dict, caller: str = "run_e2e") -> dict:
                         f"Scanned test_tool/ — no test files found.\n"
                         f"⛔ REMINDER: You must write files to EXACT paths:\n"
                         f"  Test file: {test_file_path}\n"
-                        f"  Run script: {os.path.join(working_dir, 'test_tool', f'run_e2e_{qa_id}.sh')}"
+                        f"  Run script: {os.path.join(working_dir, 'test_tool', f'run_e2e_{qa_id}.sh') if qa_tasks else os.path.join(working_dir, 'test_tool', 'run_e2e.sh')}"
                     ),
                     "execution_returncode": 1,
                     "e2e_infra_failure": True,

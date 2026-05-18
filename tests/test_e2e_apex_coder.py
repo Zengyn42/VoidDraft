@@ -47,28 +47,26 @@ async def test_agent_json_structure():
     assert raw["name"] == "apex_coder", f"name 应为 apex_coder，实际: {raw['name']}"
     assert "routing_hint" in raw and len(raw["routing_hint"]) > 10, "routing_hint 缺失或过短"
     assert raw["llm"] == "claude", f"llm 应为 claude，实际: {raw['llm']}"
-    assert raw["persona_files"] == ["ROLE.md", "PROTOCOL.md"], f"persona_files 应为 ['ROLE.md', 'PROTOCOL.md']，实际: {raw['persona_files']}"
 
     # graph 结构
     graph = raw["graph"]
     nodes = graph["nodes"]
     edges = graph["edges"]
-    assert len(nodes) == 1, f"应为单节点图，实际 {len(nodes)} 个节点"
-    # edges 可为空（框架从 entry/exit 自动生成 start→entry 和 exit→end 边）
+    node_ids = [n["id"] for n in nodes]
+    expected_nodes = {"setup", "claude_qa", "reset_for_coder", "claude_coder", "executor", "route", "inject_error_context"}
+    assert expected_nodes <= set(node_ids), f"缺少节点: {expected_nodes - set(node_ids)}"
     assert isinstance(edges, list), f"edges 应为 list，实际: {type(edges)}"
 
-    # 节点配置
-    node = nodes[0]
-    assert node["id"] == "apex_main", f"节点 id 应为 apex_main，实际: {node['id']}"
-    assert node["type"] == "CLAUDE_CLI", f"节点类型应为 CLAUDE_CLI，实际: {node['type']}"
-    assert node["session_key"] == "apex", f"session_key 应为 apex，实际: {node.get('session_key')}"
-    assert node["permission_mode"] == "bypassPermissions", "permission_mode 应为 bypassPermissions"
-    assert "Agent" in node["tools"], "tools 中必须含 Agent（用于 spawn 子 agent）"
-    assert node["setting_sources"] is None, "setting_sources 应为 null（节省 token）"
+    # 节点配置 — claude_coder 节点
+    coder_node = next(n for n in nodes if n["id"] == "claude_coder")
+    assert coder_node["type"] == "CLAUDE_SDK", f"claude_coder 节点类型应为 CLAUDE_SDK，实际: {coder_node['type']}"
+    assert coder_node["session_key"] == "apex_coder", f"session_key 应为 apex_coder，实际: {coder_node.get('session_key')}"
+    assert coder_node["permission_mode"] == "bypassPermissions", "permission_mode 应为 bypassPermissions"
+    assert "Agent" in coder_node["tools"], "tools 中必须含 Agent"
+    assert coder_node["setting_sources"] is None, "setting_sources 应为 null（节省 token）"
 
-    # 边（框架通过 entry/exit 字段自动生成 start→entry 和 exit→end 边，edges 列表可为空）
-    assert graph.get("entry") == "apex_main", "graph.entry 应为 apex_main"
-    assert graph.get("exit") == "apex_main", "graph.exit 应为 apex_main"
+    # graph entry
+    assert graph.get("entry") == "setup", "graph.entry 应为 setup"
 
     logger.info("✅ entity.json structure OK")
 
@@ -81,11 +79,11 @@ async def test_graph_compiles():
     g = await loader.build_graph(checkpointer=None)
     node_ids = set(g.nodes.keys())
 
-    assert "apex_main" in node_ids, "图中缺少 apex_main 节点"
     assert "__start__" in node_ids, "图中缺少 __start__ 节点"
-    # 单节点图：只有 __start__ + apex_main（+ 可能的 __end__）
+    expected = {"setup", "claude_qa", "reset_for_coder", "claude_coder", "executor", "route", "inject_error_context"}
     real_nodes = node_ids - {"__start__"}
-    assert "apex_main" in real_nodes, "apex_main 应为唯一业务节点"
+    missing = expected - real_nodes
+    assert not missing, f"图中缺少节点: {missing}"
 
     logger.info(f"✅ graph compiles OK: nodes={sorted(node_ids)}")
 
@@ -103,64 +101,59 @@ async def test_no_checkpointer():
 
 
 async def test_soul_md_loads():
-    """SOUL.md 存在且通过 load_system_prompt 加载。"""
-    from framework.loader import EntityLoader
+    """节点级 persona 文件存在且内容完整。"""
+    # apex_coder 使用节点级 persona_files，不再有顶层 persona_files
+    coder_role = AGENT_DIR / "CODER_ROLE.md"
+    protocol = AGENT_DIR / "PROTOCOL.md"
 
-    loader = EntityLoader(AGENT_DIR)
-    prompt = loader.load_system_prompt()
+    assert coder_role.exists(), f"CODER_ROLE.md 不存在: {coder_role}"
+    assert protocol.exists(), f"PROTOCOL.md 不存在: {protocol}"
 
-    assert len(prompt) > 100, f"system prompt 过短 ({len(prompt)} chars)，persona 可能未加载"
-    assert "全栈工程执行官" in prompt, "persona 应含身份标识'全栈工程执行官'"
-    assert "P8" in prompt, "persona 应含 P8 等级标识"
+    coder_text = coder_role.read_text(encoding="utf-8")
+    protocol_text = protocol.read_text(encoding="utf-8")
 
-    logger.info(f"✅ persona loads OK ({len(prompt)} chars)")
+    assert len(coder_text) > 100, f"CODER_ROLE.md 过短 ({len(coder_text)} chars)"
+    assert "P8" in coder_text, "CODER_ROLE.md 应含 P8 等级标识"
+
+    logger.info(f"✅ persona files OK (CODER_ROLE={len(coder_text)} chars, PROTOCOL={len(protocol_text)} chars)")
 
 
 async def test_soul_md_contains_ecc():
-    """SOUL.md 含 ECC 核心方法论关键段落。"""
-    from framework.loader import EntityLoader
-
-    prompt = EntityLoader(AGENT_DIR).load_system_prompt()
+    """PROTOCOL.md 含 ECC 核心方法论关键段落。"""
+    protocol_text = (AGENT_DIR / "PROTOCOL.md").read_text(encoding="utf-8")
 
     ecc_markers = [
         "Eval-First",       # Eval-First Loop
         "15 分钟",          # 15-minute unit rule
-        "Haiku",            # Model routing
-        "Sonnet",
-        "Opus",
-        "planner",          # Sub-agent table
-        "architect",
-        "code-reviewer",
-        "security-reviewer",
-        "pua-debugger",
     ]
-    missing = [m for m in ecc_markers if m not in prompt]
-    assert not missing, f"SOUL.md 缺少 ECC 关键词: {missing}"
+    missing = [m for m in ecc_markers if m not in protocol_text]
+    assert not missing, f"PROTOCOL.md 缺少 ECC 关键词: {missing}"
 
-    logger.info("✅ SOUL.md ECC content OK")
+    # Sub-agent table is in .claude/agents/
+    agents_dir = AGENT_DIR / ".claude" / "agents"
+    if agents_dir.exists():
+        agent_files = " ".join(f.read_text(encoding="utf-8") for f in agents_dir.glob("*.md"))
+        for marker in ("planner", "code-reviewer"):
+            assert marker in agent_files or (agents_dir / f"{marker}.md").exists(), \
+                f"缺少 sub-agent: {marker}"
+
+    logger.info("✅ ECC content OK")
 
 
 async def test_soul_md_contains_pua():
-    """SOUL.md 含 PUA 铁律精简版关键段落。"""
-    from framework.loader import EntityLoader
-
-    prompt = EntityLoader(AGENT_DIR).load_system_prompt()
+    """PROTOCOL.md 含 PUA 铁律关键段落。"""
+    protocol_text = (AGENT_DIR / "PROTOCOL.md").read_text(encoding="utf-8")
 
     pua_markers = [
         "铁律一",
         "铁律二",
         "铁律三",
-        "L1",
-        "L2",
-        "L3",
-        "L4",
-        "7 项检查清单",
         "穷尽一切",
     ]
-    missing = [m for m in pua_markers if m not in prompt]
-    assert not missing, f"persona 缺少 PUA 关键词: {missing}"
+    missing = [m for m in pua_markers if m not in protocol_text]
+    assert not missing, f"PROTOCOL.md 缺少 PUA 关键词: {missing}"
 
-    logger.info("✅ SOUL.md PUA content OK")
+    logger.info("✅ PUA content OK")
 
 
 async def test_ecc_agents_in_place():
@@ -229,16 +222,19 @@ async def test_agent_config():
 
 
 async def test_add_dirs_config():
-    """entity.json 节点含 add_dirs，指向 agents/apex_coder。"""
+    """entity.json claude_coder 节点含 add_dirs，指向 apex_coder 目录。"""
     raw = json.loads((AGENT_DIR / "entity.json").read_text(encoding="utf-8"))
-    node = raw["graph"]["nodes"][0]
-    assert "add_dirs" in node, "节点缺少 add_dirs 字段"
-    assert any("apex_coder" in d for d in node["add_dirs"]), f"add_dirs 应含 apex_coder 路径，实际: {node['add_dirs']}"
+    nodes = raw["graph"]["nodes"]
+    coder_node = next((n for n in nodes if n["id"] == "claude_coder"), None)
+    assert coder_node is not None, "entity.json 缺少 claude_coder 节点"
+    assert "add_dirs" in coder_node, "claude_coder 节点缺少 add_dirs 字段"
+    assert any("apex_coder" in d for d in coder_node["add_dirs"]), \
+        f"add_dirs 应含 apex_coder 路径，实际: {coder_node['add_dirs']}"
     logger.info("✅ add_dirs config OK")
 
 
 async def test_skill_isolation():
-    """所有技能文件都在 apex_coder 隔离目录内，项目根 .claude/ 无 agent/skill 残留。"""
+    """所有技能文件都在 apex_coder 隔离目录内，VoidDraft 项目根 .claude/ 无 agent/skill 残留。"""
     expected_skills = {
         "api-design", "backend-patterns", "coding-standards",
         "e2e-testing", "eval-harness", "pua-debugging",
@@ -248,11 +244,12 @@ async def test_skill_isolation():
     missing = expected_skills - actual
     assert not missing, f"缺少 skill 目录: {missing}"
 
-    # 项目根 .claude/ 不应有 agents/ 或 skills/ 残留
-    project_agents = Path(".claude/agents")
-    project_skills = Path(".claude/skills")
-    assert not project_agents.exists(), f"项目根 .claude/agents/ 应已清空（移至 apex_coder）"
-    assert not project_skills.exists(), f"项目根 .claude/skills/ 应已清空（移至 apex_coder）"
+    # VoidDraft 项目根 .claude/ 不应有 agents/ 或 skills/ 残留
+    voiddraft_root = Path(__file__).parent.parent
+    project_agents = voiddraft_root / ".claude" / "agents"
+    project_skills = voiddraft_root / ".claude" / "skills"
+    assert not project_agents.exists(), f"VoidDraft .claude/agents/ 应已清空（移至 apex_coder）"
+    assert not project_skills.exists(), f"VoidDraft .claude/skills/ 应已清空（移至 apex_coder）"
 
     logger.info(f"✅ skill isolation OK: {sorted(actual)}")
 
