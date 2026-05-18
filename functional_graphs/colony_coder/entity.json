@@ -1,0 +1,34 @@
+{
+  "name": "colony_coder",
+  "graph": {
+    "state_schema": "colony_coder_schema",
+    "nodes": [
+      {
+        "id": "plan",
+        "agent_dir": "../colony_coder_planner"
+      },
+      {
+        "id": "execute",
+        "agent_dir": "../colony_coder_executor"
+      },
+      {
+        "id": "e2e_gate",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "qa",
+        "agent_dir": "../colony_coder_qa"
+      }
+    ],
+    "entry": "plan",
+    "edges": [
+      {"from": "plan",      "to": "execute"},
+      {"from": "execute",   "to": "e2e_gate"},
+      {"from": "e2e_gate",  "to": "qa",       "type": "routing_to"},
+      {"from": "e2e_gate",  "to": "execute",  "type": "routing_to"},
+      {"from": "e2e_gate",  "to": "__end__",  "type": "routing_to", "id": "no_routing"},
+      {"from": "qa",        "to": "execute",  "type": "routing_to"},
+      {"from": "qa",        "to": "__end__",  "type": "routing_to", "id": "no_routing"}
+    ]
+  }
+}

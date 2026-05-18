@@ -1,0 +1,50 @@
+{
+  "name": "colony_coder_qa",
+  "graph": {
+    "state_schema": "colony_coder_schema",
+    "nodes": [
+      {
+        "id": "inject_e2e_context",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "scaffold_e2e",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "generate_e2e",
+        "type": "OLLAMA",
+        "model": "gemma4:31b",
+        "session_key": "qa_e2e_session",
+        "timeout": 300,
+        "max_iterations": 5,
+        "options": {"think": false},
+        "tools": ["read_file"],
+        "system_prompt": "You are the QA ENGINEER for Colony Coder.\n\n## Your ONLY Job\nRead the source files and OUTPUT Python test code as a code block.\n\nYou cannot write files. You cannot run commands. You only READ and OUTPUT.\n\n## Process\n1. Use `read_file` to read each source file listed in the prompt.\n2. Write pytest tests that cover the test scope.\n3. Output the complete test file as a SINGLE Python code block:\n\n```python\n# your test code here\n```\n\n## Test Writing Rules\n- Import from source modules directly (no curses display needed).\n- For curses programs: instantiate classes with a mock stdscr (MagicMock).\n- Keep each test under 10 seconds; full suite under 90 seconds.\n- Test the LOGIC, not the rendering.\n- Use `unittest.mock.MagicMock()` for stdscr if needed.\n- Every test function must start with `test_`.\n\n## Output Format\nOutput ONLY:\n1. Brief analysis (2-3 sentences)\n2. The complete test file in one ```python ... ``` block\n\nDo NOT output anything else. Do NOT attempt to write files."
+      },
+      {
+        "id": "write_test_file",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "run_e2e",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "e2e_route",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "entry": "inject_e2e_context",
+    "edges": [
+      {"from": "inject_e2e_context",    "to": "scaffold_e2e",          "type": "routing_to"},
+      {"from": "inject_e2e_context",    "to": "run_e2e",               "type": "routing_to"},
+      {"from": "scaffold_e2e",          "to": "generate_e2e"},
+      {"from": "generate_e2e",          "to": "write_test_file"},
+      {"from": "write_test_file",       "to": "run_e2e"},
+      {"from": "run_e2e",               "to": "e2e_route"},
+      {"from": "e2e_route",             "to": "inject_e2e_context",    "type": "routing_to"},
+      {"from": "e2e_route",             "to": "__end__",               "type": "routing_to", "id": "no_routing"}
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "llm": "llama",
+  "channel_history_limit": 0,
+  "mcp": [],
+  "graph": {
+    "nodes": [
+      {
+        "id": "llama_main",
+        "type": "OLLAMA",
+        "extra_persona": true,
+        "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
+        "model": "gemma4:e4b",
+        "endpoint": "http://localhost:11434",
+        "timeout": 300,
+        "first_turn_suffix": "Asa:",
+        "user_msg_prefix": "",
+        "tombstone_enabled": false,
+        "tools": ["read_file", "write_file", "bash_exec", "list_dir"],
+        "tool_rules": [],
+        "options": {
+          "think": "medium"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": "__start__",
+        "to": "llama_main"
+      },
+      {
+        "from": "llama_main",
+        "to": "__end__"
+      }
+    ]
+  },
+  "max_retries": 2
+}

@@ -1,0 +1,88 @@
+{
+  "name": "apex_coder",
+  "routing_hint": "当编程问题极其复杂、需要全力以赴穷举所有方案时使用。适用：多次失败仍未解决的 bug、完整架构重构、跨多文件系统变更、需要深度 debug 的环境/配置问题。",
+  "llm": "claude",
+  "graph": {
+    "state_schema": "apex_coder_schema",
+    "entry": "setup",
+    "nodes": [
+      {
+        "id": "setup",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "claude_qa",
+        "type": "CLAUDE_SDK",
+        "model": "claude-sonnet-4-6",
+        "session_key": "apex_qa",
+        "inherit_from": "claude_main",
+        "tools": ["Read", "Write", "Bash"],
+        "permission_mode": "bypassPermissions",
+        "persona_files": ["./QA_ROLE.md", "./PROTOCOL.md"],
+        "output_field": "qa_summary",
+        "setting_sources": null
+      },
+      {
+        "id": "reset_for_coder",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "claude_coder",
+        "type": "CLAUDE_SDK",
+        "model": "claude-opus-4-6",
+        "extra_persona": true,
+        "session_key": "apex_coder",
+        "inherit_from": "claude_main",
+        "tools": [
+          "Read", "Write", "Edit", "Bash",
+          "Glob", "Grep", "NotebookEdit", "Agent"
+        ],
+        "permission_mode": "bypassPermissions",
+        "max_turns": 50,
+        "persona_files": ["./CODER_ROLE.md", "./PROTOCOL.md"],
+        "output_field": "apex_conclusion",
+        "setting_sources": null,
+        "settings_override": {
+          "enabledPlugins": [],
+          "hooks": {
+            "PreToolUse": [{
+              "matcher": "Write|Edit",
+              "hooks": [{
+                "type": "command",
+                "command": "python3 blueprints/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
+              }]
+            }]
+          }
+        },
+        "add_dirs": [
+          "blueprints/functional_graphs/apex_coder"
+        ]
+      },
+      {
+        "id": "executor",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "route",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "inject_error_context",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "edges": [
+      {"from": "setup",                 "to": "claude_qa"},
+      {"from": "claude_qa",             "to": "reset_for_coder"},
+      {"from": "reset_for_coder",       "to": "claude_coder"},
+      {"from": "claude_coder",          "to": "executor"},
+      {"from": "executor",              "to": "route"},
+      {"from": "route",                 "to": "inject_error_context", "type": "routing_to"},
+      {"from": "route",                 "to": "__end__",              "type": "routing_to"},
+      {"from": "inject_error_context",  "to": "claude_coder"}
+    ]
+  },
+  "max_retries": 0,
+  "db_path": "apex_coder.db",
+  "sessions_file": "sessions.json"
+}

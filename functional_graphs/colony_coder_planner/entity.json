@@ -1,0 +1,41 @@
+{
+  "name": "colony_coder_planner",
+  "graph": {
+    "state_schema": "colony_coder_schema",
+    "nodes": [
+      {
+        "id": "design_debate",
+        "agent_dir": "blueprints/functional_graphs/debate_claude_first"
+      },
+      {
+        "id": "claude_swarm",
+        "type": "CLAUDE_SDK",
+        "session_key": "planner_session",
+        "tools": [],
+        "permission_mode": "plan",
+        "system_prompt": "You are a MULTI-PERSPECTIVE REVIEWER for Colony Coder.\n\nYou will receive a design debate conclusion containing: a technical plan, critiques from multiple reviewers, and a revised final plan.\n\n⛔ ABSOLUTE RULES:\n- DO NOT write any code. DO NOT use any tools.\n- Evaluate from THREE angles: correctness, maintainability, testability.\n- Output a FINAL RECOMMENDATION: which approach to take and why.\n- Explicitly state the file structure (filenames only, no code) and key interfaces.\n- Keep your response under 600 words."
+      },
+      {
+        "id": "task_decompose",
+        "type": "CLAUDE_SDK",
+        "session_key": "planner_session",
+        "tools": [],
+        "permission_mode": "plan",
+        "resume_prompt": "ROLE SWITCH: You are now the TASK DECOMPOSER.\n\nDecompose the approved plan into atomic coding tasks. Each task should produce LESS THAN 150 lines of code. Split large components across multiple tasks.\n\n⛔ YOUR RESPONSE MUST BE EXACTLY ONE JSON OBJECT — nothing else. No markdown, no explanation, no preamble.\n\nRequired format:\n{\"tasks\": [{\"id\": \"t1\", \"description\": \"...\", \"dependencies\": []}], \"execution_order\": [\"t1\", \"t2\", \"t3\"], \"refined_plan\": \"summary\", \"e2e_plan\": {\"acceptance_criteria\": [\"...\"], \"test_scenarios\": [\"...\"], \"run_command\": \"python3 main.py\", \"headless_notes\": \"...\"}, \"qa_tasks\": [{\"id\": \"q1\", \"scope\": \"...\", \"test_file\": \"test_q1.py\", \"depends_on\": [\"t1\", \"t2\"]}], \"working_directory\": \"/tmp/colony_game\"}\n\n⚠️ TASK SIZE RULES:\n- Each task: <150 lines of output code. If bigger, SPLIT IT.\n- Aim for 4-8 tasks total.\n- For single-file projects: t1=create file with imports+enums+data classes, t2=add algorithm functions, t3=add AI/logic classes, t4=add main class+game loop, t5=add entry point. Each task APPENDS to the file created by earlier tasks.\n- Each task description must include: exact file path, class/function names, key method signatures.\n- Keep each task description UNDER 300 WORDS. Be concise — list names and signatures, skip prose explanation.\n- DO NOT simplify or dumb down the design from the debate conclusion. Preserve ALL algorithmic complexity (Voronoi, minimax, state machines, etc.) exactly as designed.\n\nIMPORTANT: You MUST include both \"e2e_plan\" AND \"qa_tasks\" fields.\n- \"e2e_plan\": overall E2E test plan (acceptance_criteria, test_scenarios, run_command, headless_notes)\n- \"qa_tasks\": list of 2-4 scoped QA subtasks. Each qa_task covers a SLICE of behavior (e.g. one module or one user-visible feature). Smaller scope = faster test generation. Format: {\"id\": \"q1\", \"scope\": \"one paragraph describing what to test\", \"test_file\": \"test_q1.py\", \"depends_on\": [\"t1\", \"t2\"]}\n\nStart your response with { and end with }. Any non-JSON output will cause a parse failure.",
+        "system_prompt": "You are the TASK DECOMPOSER for Colony Coder.\n\nYou will receive the approved plan and review. Your ONLY job: decompose it into atomic coding tasks that can be implemented one at a time.\n\n⚠️ CRITICAL CONTEXT:\n- NO code exists yet. The project directory is EMPTY.\n- Every task must describe CREATING new files or APPENDING to files created by earlier tasks.\n- The previous discussion was a DESIGN debate — no code was written.\n- Use verbs like: \"Create\", \"Write\", \"Implement\", NOT \"Refactor\", \"Modify\", \"Fix\".\n\n⚠️⚠️ TASK SIZE CONSTRAINT:\n- Each task MUST produce LESS THAN 150 lines of code.\n- If a component would be >150 lines, SPLIT IT into multiple tasks.\n- For a single-file project: task 1 creates the file with basic classes, task 2 appends algorithm functions, task 3 appends AI logic, task 4 appends the main loop, etc.\n- Each task description must be SELF-CONTAINED but CONCISE: list exact file path, class/function names, key signatures. UNDER 300 WORDS per task. No long prose.\n- Aim for 4-8 tasks. NEVER put everything in 1 task.\n\n⚠️⚠️ PRESERVE DESIGN COMPLEXITY:\n- DO NOT simplify or water down the algorithms from the debate conclusion.\n- If the debate designed Voronoi partitioning, minimax, state machines, or pursuit modes — the tasks MUST implement them exactly as designed.\n- The executor is capable of implementing complex algorithms when given clear, precise task descriptions with exact method signatures and pseudocode-level behavior specs.\n\n⛔ ABSOLUTE RULES:\n- DO NOT write any code. DO NOT use any tools.\n- Output ONLY a JSON object (no markdown fences, no explanation before/after).\n- The JSON must have exactly these fields:\n  {\n    \"tasks\": [{\"id\": \"t1\", \"description\": \"...\", \"dependencies\": []}],\n    \"execution_order\": [\"t1\", \"t2\"],\n    \"refined_plan\": \"one paragraph summary\",\n    \"e2e_plan\": {\n      \"acceptance_criteria\": [\"criterion 1\", \"criterion 2\"],\n      \"test_scenarios\": [\"scenario 1: input X → expect Y\"],\n      \"run_command\": \"python3 main.py\",\n      \"headless_notes\": \"how to test without GUI\"\n    },\n    \"working_directory\": \"/tmp/colony_game\"\n  }\n- Each task description must be specific enough for a coder to implement WITHOUT seeing the plan.\n- Dependencies: list of task IDs that must complete before this task.\n- Task descriptions should include: exact file path, class/function names, method signatures, and expected behavior.\n\n⚠️ e2e_plan GUIDELINES:\nThe e2e_plan is for a QA engineer who will WRITE automated E2E tests and RUN them against the finished product. They test from a USER perspective, not code internals.\n- acceptance_criteria: list of user-visible behaviors the product MUST exhibit\n- test_scenarios: specific testable scenarios with expected outcomes\n- run_command: the exact command to launch the program\n- headless_notes: how to run/test without interactive GUI (e.g. pipe input, mock curses, timeout)\n\n⚠️ qa_tasks GUIDELINES:\nSplit the QA work into 2-4 smaller subtasks so each QA call covers a focused slice of behavior.\n- Each qa_task scope: 1-2 paragraphs describing exactly WHAT to test and HOW (headless approach)\n- test_file: the filename that will be written (e.g. \"test_movement.py\", \"test_ai.py\")\n- depends_on: list of coder task IDs whose output this qa_task needs\n- Aim for natural boundaries: one qa_task per module/layer (data model, game logic, AI, UI/flow)\n- The LAST qa_task should be a full integration/game-flow test"
+      },
+      {
+        "id": "decomposition_validator",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "entry": "design_debate",
+    "edges": [
+      {"from": "design_debate",           "to": "claude_swarm"},
+      {"from": "claude_swarm",            "to": "task_decompose"},
+      {"from": "task_decompose",          "to": "decomposition_validator"},
+      {"from": "decomposition_validator", "to": "task_decompose", "type": "routing_to"},
+      {"from": "decomposition_validator", "to": "__end__",        "type": "routing_to"}
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "llm_alive_heartbeat",
+  "description": "LLM 服务存活检测",
+  "tasks": [
+    {
+      "id": "probe_ollama",
+      "type": "PROBE",
+      "name": "ollama",
+      "interval_hours": 1
+    },
+    {
+      "id": "probe_claude",
+      "type": "PROBE",
+      "name": "claude",
+      "interval_hours": 1
+    },
+    {
+      "id": "probe_gemini",
+      "type": "PROBE",
+      "name": "gemini",
+      "interval_hours": 1
+    }
+  ]
+}

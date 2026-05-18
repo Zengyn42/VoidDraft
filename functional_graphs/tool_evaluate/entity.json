@@ -1,0 +1,48 @@
+{
+  "name": "ToolEvaluate",
+  "routing_hint": "当用户确认了工具发现的评估维度后使用。这是第二阶段：按维度打分、沙箱评估、生成最终报告。用户说「维度可以」「确认」「开始评估」时触发。",
+  "graph": {
+    "state_schema": "tool_discovery_schema",
+    "entry": "candidate_score",
+    "exit": "report_gen",
+    "nodes": [
+      {
+        "id": "candidate_score",
+        "type": "CLAUDE_SDK",
+        "model": null,
+        "tools": [],
+        "permission_mode": "plan",
+        "system_prompt": "你是工具发现流水线的候选打分节点。\n\n你会从 state 中的 discovery_report 字段读取第一阶段的数据（JSON 格式），包含：\n- user_query：用户原始需求\n- dimensions：已确认的评估维度（含 name、weight、description）\n- raw_candidates：完整的候选仓库列表\n\n同时，用户可能在确认维度时提供了修改意见（在 messages 中）。如果用户修改了维度（调整权重、增删维度），以用户的修改为准。\n\n你的任务：\n对每个候选仓库，按每个维度独立打分（0-10），并给出该维度的打分理由。\n最终 relevance_score = 各维度分数的加权和（四舍五入到一位小数）。\n\n## 输出格式\n\n你必须严格输出以下 JSON 格式（不要输出其他内容）：\n```json\n{\n  \"dimensions\": [\n    {\"name\": \"维度名\", \"weight\": 0.3, \"description\": \"说明\"}\n  ],\n  \"candidates\": [\n    {\n      \"repo\": \"owner/name\",\n      \"url\": \"https://github.com/...\",\n      \"scores\": [\n        {\"dimension\": \"维度名\", \"score\": 8, \"rationale\": \"打分理由\"}\n      ],\n      \"relevance_score\": 7.5,\n      \"stars\": 1234,\n      \"language\": \"Python\",\n      \"description\": \"...\"\n    }\n  ]\n}\n```\n\ncandidates 按 relevance_score 降序排列。只保留 score >= 5.0 的候选，最多保留 5 个。",
+        "session_key": "candidate_score",
+        "tombstone_enabled": false,
+        "first_turn_suffix": "",
+        "user_msg_prefix": ""
+      },
+      {
+        "id": "sandbox_eval",
+        "type": "DETERMINISTIC",
+        "agent_dir": "framework/nodes/tool_discovery"
+      },
+      {
+        "id": "report_gen",
+        "type": "CLAUDE_SDK",
+        "extra_persona": true,
+        "persona_files": ["../tool_discovery/ROLE.md"],
+        "model": null,
+        "tools": [],
+        "permission_mode": "plan",
+        "system_prompt": "你是工具发现流水线的报告生成节点。你会收到：\n1. 用户的原始需求\n2. 评估维度（从用户需求中提取的打分标准及权重）\n3. 经过筛选的候选工具列表（含各维度得分）\n4. 沙箱评估结果（安装/测试情况）\n\n生成一份面向用户的评估报告，使用 Markdown 格式：\n\n## 工具发现报告\n\n### 需求\n[用户原始需求]\n\n### 评估标准\n列出本次使用的评估维度、权重及设计理由。用表格呈现。\n\n### 推荐工具\n\n对每个工具：\n- **名称**（链接）— ⭐ 星标数、语言\n- 综合评分：X/10\n- 各维度得分明细（表格）\n- 简介\n- 安装/测试状态\n- 优点/缺点\n\n### 总结\n综合建议，推荐首选工具及理由。对比各工具在关键维度上的差异。\n\n保持专业、简洁。如有评估失败的工具，如实标注。",
+        "session_key": "report_gen",
+        "tombstone_enabled": false,
+        "first_turn_suffix": "",
+        "user_msg_prefix": "",
+        "output_field": "discovery_report"
+      }
+    ],
+    "edges": [
+      {"from": "candidate_score", "to": "sandbox_eval"},
+      {"from": "sandbox_eval",    "to": "report_gen"}
+    ]
+  },
+  "max_retries": 1
+}

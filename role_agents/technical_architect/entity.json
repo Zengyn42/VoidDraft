@@ -1,0 +1,285 @@
+{
+  "llm": "claude",
+  "channel_history_limit": 0,
+  "mcp": [
+    {
+      "name": "gitnexus",
+      "cmd": ["gitnexus", "serve", "--port", "4747"],
+      "url": "http://localhost:4747/api/mcp",
+      "type": "http",
+      "shared": true
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "claude_main",
+        "type": "CLAUDE_SDK",
+        "extra_persona": true,
+        "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
+        "model": null,
+        "tools": [
+          "Read",
+          "Write",
+          "Edit",
+          "Bash",
+          "Glob",
+          "Grep"
+        ],
+        "permission_mode": "bypassPermissions",
+        "setting_sources": null,
+        "settings_override": {
+          "enabledPlugins": []
+        },
+        "first_turn_suffix": "Hani:",
+        "user_msg_prefix": "老板: ",
+        "tombstone_enabled": true,
+        "tool_rules": [
+          {
+            "pattern": "论文|paper|arXiv|arxiv|研究|publication",
+            "flags": [
+              "IGNORECASE"
+            ],
+            "tools": [
+              "WebFetch",
+              "WebSearch"
+            ]
+          },
+          {
+            "pattern": "搜索|search|网络|internet|url|http",
+            "flags": [
+              "IGNORECASE"
+            ],
+            "tools": [
+              "WebFetch",
+              "WebSearch"
+            ]
+          },
+          {
+            "pattern": "notebook|jupyter|\\.ipynb",
+            "flags": [
+              "IGNORECASE"
+            ],
+            "tools": [
+              "NotebookEdit"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "validate",
+        "type": "VALIDATE"
+      },
+      {
+        "id": "git_snapshot",
+        "type": "GIT_SNAPSHOT"
+      },
+      {
+        "id": "git_rollback",
+        "type": "GIT_ROLLBACK"
+      },
+      {
+        "id": "debate_brainstorm",
+        "agent_dir": "blueprints/functional_graphs/debate_gemini_first",
+        "session_mode": "fresh_per_call"
+      },
+      {
+        "id": "debate_design",
+        "agent_dir": "blueprints/functional_graphs/debate_claude_first",
+        "session_mode": "fresh_per_call"
+      },
+      {
+        "id": "gmail_reader",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": [
+            "bash",
+            "-c",
+            "gws gmail users messages list --params '{\"userId\":\"me\",\"maxResults\":10,\"labelIds\":\"INBOX\"}' --format json 2>/dev/null | python3 -c \"\nimport json,sys,subprocess\ndata=json.load(sys.stdin)\nmsgs=data.get('messages',[])[:10]\nresult=[]\nfor m in msgs:\n  r=subprocess.run(['gws','gmail','users','messages','get','--params',json.dumps({'userId':'me','id':m['id'],'format':'metadata'}),'--format','json'],capture_output=True,text=True)\n  if r.returncode==0:\n    out='\\n'.join(l for l in r.stdout.splitlines() if 'keyring' not in l.lower())\n    msg=json.loads(out)\n    headers={h['name']:h['value'] for h in msg.get('payload',{}).get('headers',[])}\n    result.append({'id':m['id'],'from':headers.get('From',''),'subject':headers.get('Subject',''),'date':headers.get('Date',''),'snippet':msg.get('snippet','')[:150],'labels':msg.get('labelIds',[])})\nprint(json.dumps(result,ensure_ascii=False,indent=2))\n\""
+          ],
+          "description": "读取收件箱最近10封邮件（发件人、主题、时间、摘要）",
+          "timeout": 60
+        }
+      },
+      {
+        "id": "drive_files",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": [
+            "gws",
+            "drive",
+            "files",
+            "list"
+          ],
+          "description": "列出 Google Drive 最近文件",
+          "timeout": 30
+        }
+      },
+      {
+        "id": "apex_coder",
+        "agent_dir": "blueprints/functional_graphs/apex_coder",
+        "session_mode": "inherit",
+        "routing_hint": "当编程问题极其复杂、需要全力以赴穷举所有方案时使用。适用：多次失败仍未解决的 bug、完整架构重构、跨多文件系统变更、需要深度 debug 的环境/配置问题。"
+      },
+      {
+        "id": "tool_discovery",
+        "agent_dir": "blueprints/functional_graphs/tool_discovery",
+        "session_mode": "fresh_per_call"
+      },
+      {
+        "id": "tool_evaluate",
+        "agent_dir": "blueprints/functional_graphs/tool_evaluate",
+        "session_mode": "fresh_per_call",
+        "fresh_keep_fields": ["discovery_report"]
+      },
+      {
+        "id": "video_quality_loop",
+        "agent_dir": "blueprints/functional_graphs/video_quality_loop",
+        "session_mode": "fresh_per_call"
+      },
+      {
+        "id": "discord_tools",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["python3", "-m", "framework.discord_tool_client", "{routing_context}"],
+          "description": "Discord 频道工具集：history（读消息）/ search（搜消息）/ channels（列频道）/ user（查用户）",
+          "timeout": 15
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_2_claude",
+        "from": "__start__",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_claude_2_snapshot",
+        "from": "claude_main",
+        "to": "git_snapshot"
+      },
+      {
+        "id": "e_snapshot_2_validate",
+        "from": "git_snapshot",
+        "to": "validate"
+      },
+      {
+        "id": "e_validate_2_brainstorm",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "debate_brainstorm"
+      },
+      {
+        "id": "e_validate_2_design",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "debate_design"
+      },
+      {
+        "id": "e_validate_2_gmail",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "gmail_reader"
+      },
+      {
+        "id": "e_validate_2_drive",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "drive_files"
+      },
+      {
+        "id": "e_validate_2_end",
+        "type": "no_routing",
+        "from": "validate",
+        "to": "__end__"
+      },
+      {
+        "id": "e_validate_2_rollback",
+        "type": "on_error",
+        "from": "validate",
+        "to": "git_rollback"
+      },
+      {
+        "id": "e_brainstorm_2_claude",
+        "from": "debate_brainstorm",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_design_2_claude",
+        "from": "debate_design",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_rollback_2_claude",
+        "from": "git_rollback",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_validate_2_apex",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "apex_coder"
+      },
+      {
+        "id": "e_gmail_2_claude",
+        "from": "gmail_reader",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_drive_2_claude",
+        "from": "drive_files",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_apex_2_claude",
+        "from": "apex_coder",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_validate_2_discovery",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "tool_discovery"
+      },
+      {
+        "id": "e_discovery_2_claude",
+        "from": "tool_discovery",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_validate_2_evaluate",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "tool_evaluate"
+      },
+      {
+        "id": "e_evaluate_2_claude",
+        "from": "tool_evaluate",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_validate_2_vqloop",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "video_quality_loop"
+      },
+      {
+        "id": "e_vqloop_2_claude",
+        "from": "video_quality_loop",
+        "to": "claude_main"
+      },
+      {
+        "id": "e_validate_2_discord_tools",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "discord_tools"
+      },
+      {
+        "id": "e_discord_tools_2_claude",
+        "from": "discord_tools",
+        "to": "claude_main"
+      }
+    ]
+  },
+  "max_retries": 2
+}

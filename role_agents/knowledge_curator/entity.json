@@ -1,0 +1,148 @@
+{
+  "llm": "gemini",
+  "channel_history_limit": 0,
+  "mcp": ["python:prism_rag"],
+  "graph": {
+    "nodes": [
+      {
+        "id": "gemini_main",
+        "type": "GEMINI_CLI",
+        "extra_persona": true,
+        "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
+        "model": "gemini-2.5-pro",
+        "session_key": "jei_main",
+        "enable_routing": true,
+        "permission_mode": "bypassPermissions",
+        "timeout": 120,
+        "skill_files": [
+          "skills/presenton/slides_skill.md",
+          "skills/pandoc/docs_skill.md"
+        ],
+        "system_prompt": "你是知识策展官，负责管理和展现知识资产。\n所有能力和路由格式详见 PROTOCOL.md。"
+      },
+      {
+        "id": "validate",
+        "type": "VALIDATE"
+      },
+      {
+        "id": "render_slides",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["bash", "skills/presenton/scripts/render_slides.sh", "{routing_context}"],
+          "description": "调用 Presenton 生成漂亮的 PPTX slides",
+          "timeout": 600
+        }
+      },
+      {
+        "id": "render_docs",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["bash", "skills/pandoc/scripts/render_docs.sh", "{routing_context}"],
+          "description": "调用 Pandoc 生成专业的 DOCX 文档",
+          "timeout": 60
+        }
+      },
+      {
+        "id": "gws_slides",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["bash", "skills/google_workspace/scripts/gws_exec.sh", "{routing_context}"],
+          "description": "执行 gws slides 命令操作 Google Slides",
+          "timeout": 60
+        }
+      },
+      {
+        "id": "gws_docs",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["bash", "skills/google_workspace/scripts/gws_exec.sh", "{routing_context}"],
+          "description": "执行 gws docs 命令操作 Google Docs",
+          "timeout": 60
+        }
+      },
+      {
+        "id": "discord_tools",
+        "type": "EXTERNAL_TOOL",
+        "node_config": {
+          "command": ["python3", "-m", "framework.discord_tool_client", "{routing_context}"],
+          "description": "Discord 频道工具集：history（读消息）/ search（搜消息）/ channels（列频道）/ user（查用户）",
+          "timeout": 15
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_2_gemini",
+        "from": "__start__",
+        "to": "gemini_main"
+      },
+      {
+        "id": "e_gemini_2_validate",
+        "from": "gemini_main",
+        "to": "validate"
+      },
+      {
+        "id": "e_validate_2_render_slides",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "render_slides"
+      },
+      {
+        "id": "e_validate_2_render_docs",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "render_docs"
+      },
+      {
+        "id": "e_validate_2_gws_slides",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "gws_slides"
+      },
+      {
+        "id": "e_validate_2_gws_docs",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "gws_docs"
+      },
+      {
+        "id": "e_validate_2_end",
+        "type": "no_routing",
+        "from": "validate",
+        "to": "__end__"
+      },
+      {
+        "id": "e_render_slides_2_gemini",
+        "from": "render_slides",
+        "to": "gemini_main"
+      },
+      {
+        "id": "e_render_docs_2_gemini",
+        "from": "render_docs",
+        "to": "gemini_main"
+      },
+      {
+        "id": "e_gws_slides_2_gemini",
+        "from": "gws_slides",
+        "to": "gemini_main"
+      },
+      {
+        "id": "e_gws_docs_2_gemini",
+        "from": "gws_docs",
+        "to": "gemini_main"
+      },
+      {
+        "id": "e_validate_2_discord_tools",
+        "type": "routing_to",
+        "from": "validate",
+        "to": "discord_tools"
+      },
+      {
+        "id": "e_discord_tools_2_gemini",
+        "from": "discord_tools",
+        "to": "gemini_main"
+      }
+    ]
+  },
+  "max_retries": 2
+}

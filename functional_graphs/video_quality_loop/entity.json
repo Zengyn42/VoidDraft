@@ -1,0 +1,61 @@
+{
+  "name": "video_quality_loop",
+  "llm": "ollama",
+  "graph": {
+    "state_schema": "video_quality_schema",
+    "entry": "batch_generate",
+    "nodes": [
+      {
+        "id": "batch_generate",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "extract_frames",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "quality_evaluate",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "quality_gate",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_generate",
+        "from": "__start__",
+        "to": "batch_generate"
+      },
+      {
+        "id": "e_generate_extract",
+        "from": "batch_generate",
+        "to": "extract_frames"
+      },
+      {
+        "id": "e_extract_evaluate",
+        "from": "extract_frames",
+        "to": "quality_evaluate"
+      },
+      {
+        "id": "e_evaluate_gate",
+        "from": "quality_evaluate",
+        "to": "quality_gate"
+      },
+      {
+        "id": "e_gate_retry",
+        "type": "routing_to",
+        "from": "quality_gate",
+        "to": "batch_generate"
+      },
+      {
+        "id": "e_gate_end",
+        "type": "routing_to",
+        "from": "quality_gate",
+        "to": "__end__"
+      }
+    ]
+  },
+  "routing_hint": "当需要批量生成视频并自动评估质量时使用。适用：视频生成+质量评估循环、批量生成筛选最佳视频。"
+}

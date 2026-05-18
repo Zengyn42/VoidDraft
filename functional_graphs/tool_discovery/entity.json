@@ -1,0 +1,46 @@
+{
+  "name": "ToolDiscovery",
+  "routing_hint": "当用户要求发现/搜索/评估开源工具、GitHub 项目时使用。适用于 '找一个能做X的工具' 类需求。这是第一阶段：搜索候选 + 设计评估维度，返回给用户确认。",
+  "graph": {
+    "state_schema": "tool_discovery_schema",
+    "entry": "query_expand",
+    "exit": "dimension_design",
+    "nodes": [
+      {
+        "id": "query_expand",
+        "type": "CLAUDE_SDK",
+        "model": null,
+        "tools": [],
+        "permission_mode": "plan",
+        "system_prompt": "你是工具发现流水线的查询扩展节点。用户会给你一个自然语言需求描述，你需要：\n1. 理解用户真正想要什么工具\n2. 生成多个搜索关键词（中→英翻译、同义扩展）\n3. 生成 GitHub 搜索查询（利用 topic/language/stars 等过滤器）\n4. 生成通用 Web 搜索查询\n\n你必须严格输出以下 JSON 格式（不要输出其他内容）：\n```json\n{\n  \"keywords\": [\"keyword1\", \"keyword2\", ...],\n  \"github_queries\": [\"query1\", \"query2\", ...],\n  \"web_queries\": [\"query1\", \"query2\", ...]\n}\n```",
+        "session_key": "query_expand",
+        "tombstone_enabled": false,
+        "first_turn_suffix": "",
+        "user_msg_prefix": ""
+      },
+      {
+        "id": "search_aggregate",
+        "type": "DETERMINISTIC",
+        "agent_dir": "framework/nodes/tool_discovery"
+      },
+      {
+        "id": "dimension_design",
+        "type": "CLAUDE_SDK",
+        "model": null,
+        "tools": [],
+        "permission_mode": "plan",
+        "system_prompt": "你是工具发现流水线的维度设计节点。你会收到一批 GitHub 仓库候选列表和用户的原始需求。\n\n你的任务：根据用户的需求，设计 3-5 个评估维度。每个维度必须来自用户需求的具体期待。\n\n例如：\n- 用户说「找一个批量处理图片的工具」→ 维度可能是：批量处理能力、支持格式数、API易用性、性能\n- 用户说「找一个能写 Google Slides 的 AI 工具」→ 维度可能是：Slides API 集成度、AI 生成质量、模板支持、文档完善度\n\n每个维度需指定权重（所有权重之和 = 1.0）。权重应反映该维度对用户需求的重要程度。\n\n同时，简要列出搜索到的候选工具摘要（名称、星标、语言、简介），让用户了解搜索结果。\n\n## 输出格式\n\n输出必须严格为以下 JSON（不要输出其他内容）：\n```json\n{\n  \"user_query\": \"用户原始需求\",\n  \"dimensions\": [\n    {\"name\": \"维度名\", \"weight\": 0.3, \"description\": \"为什么这个维度重要\"}\n  ],\n  \"candidate_summary\": [\n    {\"repo\": \"owner/name\", \"stars\": 1234, \"language\": \"Python\", \"description\": \"简介\"}\n  ],\n  \"raw_candidates\": \"<原样复制输入中的候选仓库 JSON 数组>\"\n}\n```\n\nraw_candidates 字段必须原样保留输入中的完整候选数据（JSON 字符串），后续阶段需要使用。",
+        "session_key": "dimension_design",
+        "tombstone_enabled": false,
+        "first_turn_suffix": "",
+        "user_msg_prefix": "",
+        "output_field": "discovery_report"
+      }
+    ],
+    "edges": [
+      {"from": "query_expand",     "to": "search_aggregate"},
+      {"from": "search_aggregate", "to": "dimension_design"}
+    ]
+  },
+  "max_retries": 1
+}

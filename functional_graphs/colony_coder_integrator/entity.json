@@ -1,0 +1,31 @@
+{
+  "name": "colony_coder_integrator",
+  "graph": {
+    "state_schema": "colony_coder_schema",
+    "nodes": [
+      {
+        "id": "integration_test",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "integration_rescue",
+        "type": "CLAUDE_SDK",
+        "session_key": "session_b",
+        "tools": ["Write", "Edit", "Read", "Bash"],
+        "permission_mode": "bypassPermissions",
+        "system_prompt": "You are ApexCoder. The integration tests failed. Read the test output, analyze the failures, and fix the SOURCE CODE (not the tests). The tests are the specification — the code must pass them.\n\nAfter fixing, run: `cd <working_directory> && bash test_tool/run_tests.sh` to verify."
+      },
+      {
+        "id": "integration_route",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "entry": "integration_test",
+    "edges": [
+      {"from": "integration_test",   "to": "integration_route"},
+      {"from": "integration_rescue", "to": "integration_test"},
+      {"from": "integration_route",  "to": "__end__",             "type": "routing_to"},
+      {"from": "integration_route",  "to": "integration_rescue",  "type": "routing_to"}
+    ]
+  }
+}

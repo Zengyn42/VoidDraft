@@ -1,0 +1,41 @@
+{
+  "name": "colony_coder_executor",
+  "graph": {
+    "state_schema": "colony_coder_schema",
+    "nodes": [
+      {
+        "id": "inject_task_context",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "code_gen",
+        "type": "OLLAMA",
+        "model": "gemma4:31b",
+        "timeout": 600,
+        "max_iterations": 7,
+        "options": {"think": false},
+        "tools": ["read_file", "write_file", "replace_lines", "list_dir", "bash_exec"],
+        "session_key": "executor_session",
+        "system_prompt": "You are a CODE GENERATOR with SELF-TESTING capability.\n\nYou receive ONE task at a time. Implement ONLY that task, then verify with tests.\n\n## Your Responsibilities\n1. Read the task description carefully — it tells you exactly what to implement.\n2. If existing files are listed, use `read_file` to examine them first (output includes LINE NUMBERS).\n3. Write NEW source files using `write_file`.\n4. EDIT existing files using `replace_lines(path, start_line, end_line, new_content)`.\n5. Write unit tests for THIS task only in test_tool/unit_tests/.\n6. Write test_tool/run_tests.sh to run all tests.\n7. Run tests using `bash_exec`: `bash test_tool/run_tests.sh`\n8. If tests FAIL: read error output, fix using `replace_lines`, re-run tests.\n9. Repeat until ALL unit tests pass.\n10. Only give your final response AFTER all tests pass.\n\n## Critical Rules\n- **ONLY implement the current task.** Do NOT write code for future tasks.\n- **Do NOT import classes/functions that don't exist yet.** Only import what is already in existing files.\n- **ALWAYS `read_file` before `replace_lines`** to get current line numbers (they shift after edits).\n- Prefer `replace_lines` over `write_file` for existing files.\n- Write COMPLETE, RUNNABLE code. No placeholders or TODO stubs.\n- Unit tests should only test code that EXISTS. Do not test unimplemented classes.\n- run_tests.sh must use `set -e` and exit non-zero on any failure.\n\n## run_tests.sh Template\n```bash\n#!/bin/bash\nset -e\ncd \"$(dirname \"$0\")/..\"\npython3 -m pytest test_tool/unit_tests/ -v 2>&1\n```\n\n## Final Output\nAfter all tests pass, confirm: which files you created/modified, how many tests pass."
+      },
+      {
+        "id": "run_tests",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "test_route",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "entry": "inject_task_context",
+    "edges": [
+      {"from": "inject_task_context", "to": "code_gen",            "type": "routing_to"},
+      {"from": "inject_task_context", "to": "__end__",             "type": "routing_to", "id": "no_routing"},
+      {"from": "code_gen",           "to": "run_tests"},
+      {"from": "run_tests",          "to": "test_route"},
+      {"from": "test_route",         "to": "code_gen",             "type": "routing_to"},
+      {"from": "test_route",         "to": "inject_task_context",  "type": "routing_to"},
+      {"from": "test_route",         "to": "__end__",              "type": "routing_to", "id": "no_routing"}
+    ]
+  }
+}

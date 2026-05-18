@@ -1,0 +1,41 @@
+{
+  "llm": "grok",
+  "channel_history_limit": 5,
+  "mcp": [],
+  "graph": {
+    "nodes": [
+      {
+        "id": "grok_main",
+        "type": "GROK",
+        "extra_persona": true,
+        "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
+        "model": "grok",
+        "tools": [],
+        "permission_mode": "bypassPermissions",
+        "node_config": {
+          "chrome_profile_dir": "/home/kingy/Foundation/EdenGateway/bot-chrome-data",
+          "timeout": 180,
+          "default_url": "https://grok.com/project/50afbd22-0176-4dc8-a46e-43255b9943f7"
+        },
+        "first_turn_suffix": "Grok:",
+        "user_msg_prefix": "User: ",
+        "tombstone_enabled": true,
+        "tool_rules": []
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_2_grok",
+        "from": "__start__",
+        "to": "grok_main"
+      },
+      {
+        "id": "e_grok_2_end",
+        "type": "no_routing",
+        "from": "grok_main",
+        "to": "__end__"
+      }
+    ]
+  },
+  "max_retries": 2
+}
