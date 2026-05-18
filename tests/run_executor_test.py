@@ -4,7 +4,7 @@
 用于快速测试不同 LLM 模型的代码生成能力。
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import json
 import logging
@@ -84,7 +84,7 @@ async def main():
     Path(WORKING_DIR).mkdir(parents=True, exist_ok=True)
 
     # 只构建 executor 子图
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_executor"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_executor")
     graph = await loader.build_graph(checkpointer=None)
 
     reporter = DebugConsoleReporter("executor_test")

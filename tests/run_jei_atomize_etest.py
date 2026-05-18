@@ -15,7 +15,7 @@ PASS 标准：
 
 Usage:
     systemctl --user stop jei
-    cd /home/kingy/Foundation/ZenithLoom
+    cd /path/to/VoidDraft/tests
     python3 run_jei_atomize_etest.py
     systemctl --user start jei
 
@@ -28,7 +28,7 @@ import os
 import logging
 from pathlib import Path
 
-framework_dir = Path("/home/kingy/Foundation/ZenithLoom")
+framework_dir = Path(__file__).parent.parent.parent / "ZenithLoom"
 os.chdir(framework_dir)
 sys.path.insert(0, str(framework_dir))
 
@@ -38,8 +38,8 @@ logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 from framework.loader import EntityLoader
 
-BLUEPRINT_DIR = Path("/home/kingy/Foundation/VoidDraft/role_agents/knowledge_curator")
-DATA_DIR      = Path("/home/kingy/Foundation/EdenGateway/agents/jei")
+BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
+DATA_DIR      = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
 TARGET_DOC    = "实验/atomize-test-doc.md"
 
 # ── 断言关键词 ─────────────────────────────────────────────────────────────────
@@ -145,13 +145,13 @@ async def main():
     print("\n" + "=" * 70)
     print("POST-CHECK: 验证 vault/knowledge/ 下新增 KNOW 文件")
     print("=" * 70)
-    know_dir = Path("/home/kingy/Foundation/NimbusVault/knowledge")
+    know_dir = Path(__file__).parent.parent.parent / "NimbusVault/knowledge"
     know_files = sorted(know_dir.glob("KNOW-*.md"))
     print(f"当前 KNOW 文件数量: {len(know_files)}")
     for f in know_files[-5:]:
         print(f"  {f.name}")
 
-    target_path = Path("/home/kingy/Foundation/NimbusVault") / TARGET_DOC
+    target_path = Path(__file__).parent.parent.parent / "NimbusVault" / TARGET_DOC
     content = target_path.read_text(encoding="utf-8")
     has_patch = "knowledge_id:" in content or "KNOW-" in content
     if has_patch:

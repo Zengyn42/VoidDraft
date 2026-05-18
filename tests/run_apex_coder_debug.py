@@ -7,7 +7,7 @@ ApexCoder TDD pipeline: splitter → ClaudeQA → reset_for_coder → ClaudeCode
 用法: python3 run_apex_coder_debug.py
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -66,7 +66,7 @@ SNAKE_TASK = (
 async def main():
     set_debug(True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/apex_coder")
     graph = await loader.build_graph(checkpointer=None)
 
     reporter = DebugConsoleReporter("apex_coder")

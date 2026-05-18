@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a benchmark task with ApexCoder. Usage: python3 run_benchmark_apex.py <task_name>"""
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -41,7 +41,7 @@ async def main():
 
     import functional_graphs.apex_coder.state  # noqa: F401
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/apex_coder")
     graph = await loader.build_graph(checkpointer=None)
     reporter = DebugConsoleReporter(f"apex_{task_name}")
 

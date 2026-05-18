@@ -2,7 +2,7 @@
 H-series test runner for Jei — drives the graph via controller.run() directly.
 
 Usage:
-    cd /home/kingy/Foundation/ZenithLoom
+    cd /path/to/VoidDraft/tests
     python3 run_jei_htest.py
 """
 import asyncio
@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 
 # ZenithLoom must be the cwd
-framework_dir = Path("/home/kingy/Foundation/ZenithLoom")
+framework_dir = Path(__file__).parent.parent.parent / "ZenithLoom"
 os.chdir(framework_dir)
 sys.path.insert(0, str(framework_dir))
 
@@ -24,8 +24,8 @@ logging.getLogger("httpcore").setLevel(logging.ERROR)
 from framework.loader import EntityLoader
 
 
-BLUEPRINT_DIR = Path("/home/kingy/Foundation/VoidDraft/role_agents/knowledge_curator")
-DATA_DIR = Path("/home/kingy/Foundation/EdenGateway/agents/jei")
+BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
+DATA_DIR = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
 
 QUESTIONS = [
     ("H1", "read_note date field regression",

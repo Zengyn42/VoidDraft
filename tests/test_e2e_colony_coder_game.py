@@ -277,7 +277,7 @@ async def test_e2e_colony_coder_game(tmp_path):
         patch.object(GeminiCLINode, "__call__", _mock_gemini_call),
         patch.object(OllamaNode, "__call__", _mock_ollama_call),
     ):
-        loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
+        loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder")
         graph = await loader.build_graph(checkpointer=None)
 
         initial_state = {
@@ -418,6 +418,6 @@ async def test_game_file_is_syntactically_valid(tmp_path):
 @pytest.mark.asyncio
 async def test_master_graph_node_wiring():
     """Master graph has plan → execute → qa wiring."""
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder")
     graph = await loader.build_graph(checkpointer=None)
     assert set(graph.nodes) - {"__start__"} >= {"plan", "execute", "qa"}

@@ -248,7 +248,7 @@ async def test_main_graph_routing_edges_no_block():
     """主图的 routing_to 边正常工作，子图节点就位。"""
     from framework.loader import EntityLoader
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect"))
+    loader = EntityLoader(Path(__file__).parent.parent / "role_agents/technical_architect")
     g = await loader.build_graph()
 
     node_ids = set(g.nodes)

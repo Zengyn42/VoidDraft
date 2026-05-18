@@ -5,7 +5,7 @@ ColonyCoder debug runner — 用 DebugConsoleReporter 可视化完整执行过�
 用法: python3 run_colony_coder_debug.py
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -81,7 +81,7 @@ async def main():
     set_debug_output_file(debug_file)
     print(f"  Debug output file: {debug_file}\n", flush=True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder")
     graph = await loader.build_graph(checkpointer=None)
 
     reporter = DebugConsoleReporter("colony_coder")

@@ -9,7 +9,7 @@
   4. Token guard 不误杀
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -37,7 +37,7 @@ async def main():
     set_debug(True)
     print("🔧 Planner 独立测试 — Debug ON\n", flush=True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_planner"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_planner")
     graph = await loader.build_graph(checkpointer=None)
 
     task = (

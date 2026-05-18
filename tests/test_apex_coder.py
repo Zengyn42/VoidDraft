@@ -94,7 +94,7 @@ import json
 
 
 def test_hook_blocks_qa_test_write():
-    hook_path = "/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
+    hook_path = str(Path(__file__).parent.parent / "functional_graphs/apex_coder/hooks/protect_qa_tests.py")
     data = {"tool_input": {"file_path": "/tmp/game/test_tool/qa_tests/test_foo.py"}}
     result = subprocess.run(
         ["python3", hook_path],
@@ -107,7 +107,7 @@ def test_hook_blocks_qa_test_write():
 
 
 def test_hook_allows_source_write():
-    hook_path = "/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
+    hook_path = str(Path(__file__).parent.parent / "functional_graphs/apex_coder/hooks/protect_qa_tests.py")
     data = {"tool_input": {"file_path": "/tmp/game/main.py"}}
     result = subprocess.run(
         ["python3", hook_path],
@@ -120,7 +120,7 @@ def test_hook_allows_source_write():
 
 
 def test_hook_allows_unit_test_write():
-    hook_path = "/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
+    hook_path = str(Path(__file__).parent.parent / "functional_graphs/apex_coder/hooks/protect_qa_tests.py")
     data = {"tool_input": {"file_path": "/tmp/game/test_tool/unit_tests/test_main.py"}}
     result = subprocess.run(
         ["python3", hook_path],
@@ -136,7 +136,7 @@ def test_hook_allows_unit_test_write():
 async def test_apex_coder_graph_compiles():
     import functional_graphs.apex_coder.state  # noqa: F401
     from framework.loader import EntityLoader
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder")).build_graph(checkpointer=None)
+    g = await EntityLoader(Path(__file__).parent.parent / "functional_graphs/apex_coder").build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__", "__end__"}
     required = {"setup", "claude_qa", "reset_for_coder", "claude_coder", "executor", "route", "inject_error_context"}
     assert required <= node_ids, f"Missing nodes: {required - node_ids}, got: {node_ids}"

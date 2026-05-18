@@ -212,7 +212,7 @@ async def test_planner_graph_compiles():
     import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     from pathlib import Path
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_planner")).build_graph(checkpointer=None)
+    g = await EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_planner").build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__"}
     required = {"design_debate", "claude_swarm", "task_decompose", "decomposition_validator"}
     assert required <= node_ids, f"Missing nodes: {required - node_ids}"
@@ -284,7 +284,7 @@ async def test_executor_graph_compiles():
     import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     from pathlib import Path
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_executor")).build_graph(checkpointer=None)
+    g = await EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_executor").build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__"}
     required = {"inject_task_context", "code_gen", "run_tests", "test_route"}
     assert required <= node_ids, f"Missing: {required - node_ids}"
@@ -316,7 +316,7 @@ async def test_integrator_graph_compiles():
     import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     from pathlib import Path
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_integrator")).build_graph(checkpointer=None)
+    g = await EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_integrator").build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__"}
     required = {"integration_test", "integration_rescue", "integration_route"}
     assert required <= node_ids, f"Missing: {required - node_ids}"
@@ -328,6 +328,6 @@ async def test_master_graph_compiles():
     import functional_graphs.colony_coder.state  # noqa: F401
     from framework.loader import EntityLoader
     from pathlib import Path
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder")).build_graph(checkpointer=None)
+    g = await EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder").build_graph(checkpointer=None)
     node_ids = set(g.nodes) - {"__start__"}
     assert {"plan", "execute", "qa"} <= node_ids

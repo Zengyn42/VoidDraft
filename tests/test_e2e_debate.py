@@ -63,11 +63,11 @@ async def test_debate_graphs_compile():
     from framework.loader import EntityLoader
 
     expected = {
-        "/home/kingy/Foundation/VoidDraft/functional_graphs/debate_gemini_first": {
+        str(Path(__file__).parent.parent / "functional_graphs/debate_gemini_first"): {
             "gemini_propose", "claude_critique_1", "gemini_revise",
             "claude_critique_2", "gemini_conclusion",
         },
-        "/home/kingy/Foundation/VoidDraft/functional_graphs/debate_claude_first": {
+        str(Path(__file__).parent.parent / "functional_graphs/debate_claude_first"): {
             "claude_propose", "gemini_critique_1", "claude_revise",
             "gemini_critique_2", "claude_conclusion",
         },
@@ -85,7 +85,7 @@ async def test_hani_graph_with_debate():
     """Hani 主图含 debate_brainstorm / debate_design external subgraph 节点。"""
     from framework.loader import EntityLoader
 
-    g = await EntityLoader(Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect")).build_graph()
+    g = await EntityLoader(Path(__file__).parent.parent / "role_agents/technical_architect").build_graph()
     node_ids = set(g.nodes)
 
     required = {
@@ -207,7 +207,7 @@ async def test_no_checkpointer_build():
     """build_graph(checkpointer=None) 编译后无 checkpointer。"""
     from framework.loader import EntityLoader
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/debate_gemini_first"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/debate_gemini_first")
     graph = await loader.build_graph(checkpointer=None)
 
     cp = getattr(graph, "checkpointer", None)

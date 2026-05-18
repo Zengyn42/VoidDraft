@@ -7,7 +7,7 @@ the accumulated-context timeout seen when running all questions in one
 long multi-turn session.
 
 Usage:
-    cd /home/kingy/Foundation/ZenithLoom
+    cd /path/to/VoidDraft/tests
     python3 run_jei_ftest.py
 """
 import asyncio
@@ -17,7 +17,7 @@ import logging
 import time
 from pathlib import Path
 
-framework_dir = Path("/home/kingy/Foundation/ZenithLoom")
+framework_dir = Path(__file__).parent.parent.parent / "ZenithLoom"
 os.chdir(framework_dir)
 sys.path.insert(0, str(framework_dir))
 
@@ -28,8 +28,8 @@ logging.getLogger("httpcore").setLevel(logging.ERROR)
 from framework.loader import EntityLoader
 
 
-BLUEPRINT_DIR = Path("/home/kingy/Foundation/VoidDraft/role_agents/knowledge_curator")
-DATA_DIR = Path("/home/kingy/Foundation/EdenGateway/agents/jei")
+BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
+DATA_DIR = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
 
 QUESTIONS = [
     # ── Code namespace search ─────────────────────────────────────────────

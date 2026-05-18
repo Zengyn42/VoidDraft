@@ -7,7 +7,7 @@ Colony Coder 完整 E2E 测试 — 真实 LLM 调用。
 Debug 模式全开，输出完整 state snapshot。
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import logging
 import sys
@@ -35,7 +35,7 @@ async def main():
     set_debug(True)
     print("🔧 Colony Coder 完整 E2E 测试 — Debug ON\n", flush=True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder")
     graph = await loader.build_graph(checkpointer=None)
 
     task = (

@@ -34,10 +34,10 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 logger = logging.getLogger("test_e2e_apex_coder")
 
-AGENT_DIR = Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder")
-CLAUDE_AGENTS_DIR = Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/.claude/agents")
-PUA_SKILL_PATH = Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/.claude/skills/pua-debugging/SKILL.md")
-SKILLS_DIR = Path("/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder/.claude/skills")
+AGENT_DIR = Path(__file__).parent.parent / "functional_graphs/apex_coder"
+CLAUDE_AGENTS_DIR = Path(__file__).parent.parent / "functional_graphs/apex_coder/.claude/agents"
+PUA_SKILL_PATH = Path(__file__).parent.parent / "functional_graphs/apex_coder/.claude/skills/pua-debugging/SKILL.md"
+SKILLS_DIR = Path(__file__).parent.parent / "functional_graphs/apex_coder/.claude/skills"
 
 
 async def test_agent_json_structure():

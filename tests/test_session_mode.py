@@ -63,7 +63,7 @@ def test_build_declarative_accepts_force_unique_session_keys():
 
 def test_debate_brainstorm_has_fresh_per_call():
     """debate_brainstorm in technical_architect entity.json must use fresh_per_call."""
-    entity_path = Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect/entity.json")
+    entity_path = Path(__file__).parent.parent / "role_agents/technical_architect/entity.json"
     if not entity_path.exists():
         pytest.skip("technical_architect entity.json not found")
     data = json.loads(entity_path.read_text())
@@ -76,7 +76,7 @@ def test_debate_brainstorm_has_fresh_per_call():
 
 def test_debate_design_has_fresh_per_call():
     """debate_design in technical_architect entity.json must use fresh_per_call."""
-    entity_path = Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect/entity.json")
+    entity_path = Path(__file__).parent.parent / "role_agents/technical_architect/entity.json"
     if not entity_path.exists():
         pytest.skip("technical_architect entity.json not found")
     data = json.loads(entity_path.read_text())
@@ -89,7 +89,7 @@ def test_debate_design_has_fresh_per_call():
 
 def test_apex_coder_uses_inherit_session_mode():
     """apex_coder subgraph uses inherit mode (fork parent session, cleanup on exit)."""
-    entity_path = Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect/entity.json")
+    entity_path = Path(__file__).parent.parent / "role_agents/technical_architect/entity.json"
     if not entity_path.exists():
         pytest.skip("technical_architect entity.json not found")
     data = json.loads(entity_path.read_text())

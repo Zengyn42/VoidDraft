@@ -15,7 +15,7 @@ Usage:
     # Stop the systemd Jei first to avoid DB contention
     systemctl --user stop jei
 
-    cd /home/kingy/Foundation/ZenithLoom
+    cd /path/to/VoidDraft/tests
     python3 run_jei_v54_etest.py
 
     # Restart after
@@ -32,7 +32,7 @@ import os
 import logging
 from pathlib import Path
 
-framework_dir = Path("/home/kingy/Foundation/ZenithLoom")
+framework_dir = Path(__file__).parent.parent.parent / "ZenithLoom"
 os.chdir(framework_dir)
 sys.path.insert(0, str(framework_dir))
 
@@ -42,8 +42,8 @@ logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 from framework.loader import EntityLoader
 
-BLUEPRINT_DIR = Path("/home/kingy/Foundation/VoidDraft/role_agents/knowledge_curator")
-DATA_DIR      = Path("/home/kingy/Foundation/EdenGateway/agents/jei")
+BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
+DATA_DIR      = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
 
 # ── Known content anchors ──────────────────────────────────────────────────────
 # KNOW-000008: "PrismRag Embedding 层次：Text-first vs 真正跨模态"

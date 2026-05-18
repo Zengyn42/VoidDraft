@@ -17,7 +17,7 @@ planner_output.json 格式：
   }
 """
 
-import sys, os\nfrom pathlib import Path\n_ZL = Path("/home/kingy/Foundation/ZenithLoom")\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
+import sys, os\nfrom pathlib import Path\n_ZL = Path(__file__).parent.parent.parent / "ZenithLoom"\nos.chdir(_ZL)\nsys.path.insert(0, str(_ZL))\n
 import asyncio
 import json
 import logging
@@ -111,7 +111,7 @@ async def main():
     # 确保 working_directory 存在
     Path(init_state["working_directory"]).mkdir(parents=True, exist_ok=True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder_executor"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder_executor")
     graph = await loader.build_graph(checkpointer=None)
 
     push_graph_scope("executor_standalone")

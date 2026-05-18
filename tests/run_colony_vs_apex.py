@@ -40,7 +40,7 @@ from framework.debug import set_debug
 from framework.debug_reporter import DebugConsoleReporter
 from langchain_core.messages import HumanMessage
 
-SNAKE_BATTLE_DIR = Path("/home/kingy/Foundation/EdenGateway/CompanyTests/CoderTest/snake_battle")
+SNAKE_BATTLE_DIR = Path(__file__).parent.parent.parent / "EdenGateway/CompanyTests/CoderTest/snake_battle"
 WORKING_DIR = Path("/tmp/colony_snake_ai")
 
 TASK = f"""\
@@ -147,7 +147,7 @@ async def run_colony_coder():
             shutil.copy2(src, WORKING_DIR / src_file)
             print(f"  Copied {src_file} to working dir", flush=True)
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/functional_graphs/colony_coder"))
+    loader = EntityLoader(Path(__file__).parent.parent / "functional_graphs/colony_coder")
     graph = await loader.build_graph(checkpointer=None)
 
     reporter = DebugConsoleReporter("colony_coder", log_dir=LOG_DIR)

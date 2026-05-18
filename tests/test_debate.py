@@ -75,7 +75,7 @@ async def run():
     from framework.nodes.llm.claude import ClaudeNode
     from framework.nodes.llm.gemini import GeminiNode
 
-    loader = EntityLoader(Path("/home/kingy/Foundation/VoidDraft/role_agents/technical_architect"))
+    loader = EntityLoader(Path(__file__).parent.parent / "role_agents/technical_architect")
     cfg = loader.load_config()
     claude = ClaudeNode(cfg, "")
     gemini = GeminiNode(cfg, claude)
