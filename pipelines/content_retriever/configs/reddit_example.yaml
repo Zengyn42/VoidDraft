@@ -1,0 +1,13 @@
+source:
+  type: reddit
+  subreddit: kpopfap
+  sort: new
+  request_delay: 1.5
+
+download_dir: /home/kingy/Downloads/kpopfap
+max_posts: 50
+analyzer: none             # ollama / claude / gemini / none
+analyze_model: gemma4:e4b  # leave blank to use each analyzer's default model
+frame_interval: 10
+max_frames: 8
+pixeldrain_api_key: "43c02391-6a82-4aec-a0dc-c67e2fbf83f0"
