@@ -80,12 +80,12 @@
       },
       {
         "id": "debate_brainstorm",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/debate_gemini_first",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/debate_gemini_first",
         "session_mode": "fresh_per_call"
       },
       {
         "id": "debate_design",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/debate_claude_first",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/debate_claude_first",
         "session_mode": "fresh_per_call"
       },
       {
@@ -117,24 +117,24 @@
       },
       {
         "id": "apex_coder",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/apex_coder",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/apex_coder",
         "session_mode": "inherit",
         "routing_hint": "当编程问题极其复杂、需要全力以赴穷举所有方案时使用。适用：多次失败仍未解决的 bug、完整架构重构、跨多文件系统变更、需要深度 debug 的环境/配置问题。"
       },
       {
         "id": "tool_discovery",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/tool_discovery",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/tool_discovery",
         "session_mode": "fresh_per_call"
       },
       {
         "id": "tool_evaluate",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/tool_evaluate",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/tool_evaluate",
         "session_mode": "fresh_per_call",
         "fresh_keep_fields": ["discovery_report"]
       },
       {
         "id": "video_quality_loop",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/video_quality_loop",
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/video_quality_loop",
         "session_mode": "fresh_per_call"
       },
       {

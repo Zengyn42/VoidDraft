@@ -5,7 +5,7 @@
     "nodes": [
       {
         "id": "design_debate",
-        "agent_dir": "/home/kingy/Foundation/AstralAtlas/functional_graphs/debate_claude_first"
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/debate_claude_first"
       },
       {
         "id": "claude_swarm",
