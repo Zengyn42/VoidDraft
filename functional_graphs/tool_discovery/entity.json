@@ -20,8 +20,7 @@
       },
       {
         "id": "search_aggregate",
-        "type": "DETERMINISTIC",
-        "agent_dir": "framework/nodes/tool_discovery"
+        "type": "DETERMINISTIC"
       },
       {
         "id": "dimension_design",
@@ -38,8 +37,14 @@
       }
     ],
     "edges": [
-      {"from": "query_expand",     "to": "search_aggregate"},
-      {"from": "search_aggregate", "to": "dimension_design"}
+      {
+        "from": "query_expand",
+        "to": "search_aggregate"
+      },
+      {
+        "from": "search_aggregate",
+        "to": "dimension_design"
+      }
     ]
   },
   "max_retries": 1

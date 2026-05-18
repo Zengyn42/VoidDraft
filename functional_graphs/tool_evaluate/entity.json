@@ -20,14 +20,15 @@
       },
       {
         "id": "sandbox_eval",
-        "type": "DETERMINISTIC",
-        "agent_dir": "framework/nodes/tool_discovery"
+        "type": "DETERMINISTIC"
       },
       {
         "id": "report_gen",
         "type": "CLAUDE_SDK",
         "extra_persona": true,
-        "persona_files": ["../tool_discovery/ROLE.md"],
+        "persona_files": [
+          "../tool_discovery/ROLE.md"
+        ],
         "model": null,
         "tools": [],
         "permission_mode": "plan",
@@ -40,8 +41,14 @@
       }
     ],
     "edges": [
-      {"from": "candidate_score", "to": "sandbox_eval"},
-      {"from": "sandbox_eval",    "to": "report_gen"}
+      {
+        "from": "candidate_score",
+        "to": "sandbox_eval"
+      },
+      {
+        "from": "sandbox_eval",
+        "to": "report_gen"
+      }
     ]
   },
   "max_retries": 1
