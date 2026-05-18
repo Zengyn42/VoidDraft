@@ -49,13 +49,13 @@
               "matcher": "Write|Edit",
               "hooks": [{
                 "type": "command",
-                "command": "python3 blueprints/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
+                "command": "python3 /home/kingy/Foundation/AstralAtlas/functional_graphs/apex_coder/hooks/protect_qa_tests.py"
               }]
             }]
           }
         },
         "add_dirs": [
-          "blueprints/functional_graphs/apex_coder"
+          "/home/kingy/Foundation/AstralAtlas/functional_graphs/apex_coder"
         ]
       },
       {
