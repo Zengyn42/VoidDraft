@@ -6,9 +6,9 @@ S2 — P2: KNOW-ID routing (Jei must call explain_node, not search_knowledge)
 S3 — P3/P4: list_knowledge_nodes body_preview + readable label in theme analysis
 
 Two-layer assertion for S2:
-  Layer A (System): search_knowledge("KNOW-000008") returns soft hint, not search results
+  Layer A (System): search_knowledge("KNOW-000032") returns soft hint, not search results
                     Verified by: hint keywords in streamed tool output OR response text
-  Layer B (Agent):  Jei eventually calls explain_node, response contains KNOW-000008 content
+  Layer B (Agent):  Jei eventually calls explain_node, response contains KNOW-000032 content
                     Verified by: known content keywords in final response
 
 Usage:
@@ -46,8 +46,8 @@ BLUEPRINT_DIR = Path(__file__).parent.parent / "role_agents/knowledge_curator"
 DATA_DIR      = Path(__file__).parent.parent.parent / "EdenGateway/agents/jei"
 
 # ── Known content anchors ──────────────────────────────────────────────────────
-# KNOW-000008: "PrismRag Embedding 层次：Text-first vs 真正跨模态"
-KNOW_000008_KEYWORDS = ["Text-first", "跨模态", "nomic-embed-vision", "embedding", "KNOW-000008"]
+# KNOW-000032: "PrismRag 多模态 Embedding — Text-first 与跨模态架构"
+KNOW_000032_KEYWORDS = ["Text-first", "跨模态", "nomic-embed-vision", "embedding", "KNOW-000032"]
 
 # A known vault doc that exists (used for S1 path test)
 KNOWN_DOC = "设计细节/PrismRag v5.4 — Atomize 体验精打磨.md"
@@ -70,7 +70,7 @@ TESTS = [
     {
         "tag": "S2-A",
         "label": "P2 System layer — search_knowledge returns soft hint for KNOW-ID",
-        "question": "KNOW-000008 的内容是什么？",
+        "question": "KNOW-000032 的内容是什么？",
         # Layer A: hint keywords should appear in stream (tool output visible to Jei)
         # We look for them in the combined stream output
         "pass_keywords": ["⚠️", "未执行搜索", "explain_node"],
@@ -81,10 +81,10 @@ TESTS = [
     },
     {
         "tag": "S2-B",
-        "label": "P2 Agent layer — Jei calls explain_node, presents KNOW-000008 content",
-        "question": "KNOW-000008 的内容是什么？",
+        "label": "P2 Agent layer — Jei calls explain_node, presents KNOW-000032 content",
+        "question": "KNOW-000032 的内容是什么？",
         # Layer B: final response must contain actual node content
-        "pass_keywords": KNOW_000008_KEYWORDS,
+        "pass_keywords": KNOW_000032_KEYWORDS,
         "fail_keywords": ["无法找到", "没有找到", "搜索结果为空", "不存在"],
         "layer": "agent",
         "note": "Verifies Jei actually called explain_node and got real content (Agent layer).",
@@ -109,10 +109,10 @@ TESTS = [
         "label": "Embedding path — semantic search triggers Ollama GPU embedding",
         # Deliberately avoids exact keywords ("Text-first", "nomic-embed-vision")
         # so BM25/exact alone cannot find the right node.
-        # Only vector similarity can surface KNOW-000008 from this paraphrase.
+        # Only vector similarity can surface KNOW-000032 from this paraphrase.
         "question": "向量空间里把图片和文字统一表示的方案，PrismRag 是怎么设计的？",
-        # KNOW-000008 content: nomic-embed-vision, 768-dim, 跨模态
-        "pass_keywords": ["nomic-embed-vision", "768", "跨模态", "KNOW-000008"],
+        # KNOW-000032 content: nomic-embed-vision, 768-dim, 跨模态
+        "pass_keywords": ["nomic-embed-vision", "768", "跨模态"],
         "fail_keywords": ["没有找到", "搜索结果为空", "无法回答", "不相关"],
         "layer": "agent",
         "note": "Verifies embedding-based hybrid search works (Ollama must be reachable). "

@@ -20,7 +20,7 @@ from framework.loader import EntityLoader
 
 _BLUEPRINT_DIR = (
     Path(__file__).resolve().parent.parent
-    / "blueprints" / "role_agents" / "technical_architect"
+    / "role_agents" / "technical_architect"
 )
 
 # ---------------------------------------------------------------------------
