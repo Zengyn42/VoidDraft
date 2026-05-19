@@ -18,11 +18,7 @@ import httpx
 
 from .base import Post, PlatformSource
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+_USER_AGENT = "python:fancam_harvester:v1.0 (by /u/fancam_bot)"
 
 
 def _collect_comments(children: list) -> list[str]:
@@ -65,6 +61,7 @@ class RedditSource(PlatformSource):
             follow_redirects=True,
             http2=False,               # Reddit blocks HTTP/2
             headers={"User-Agent": _USER_AGENT},
+            cookies={"over18": "1"},   # Required for NSFW subreddits
         )
 
     # ------------------------------------------------------------------
