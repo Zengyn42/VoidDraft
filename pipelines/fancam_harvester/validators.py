@@ -111,25 +111,51 @@ def _load_config(state: dict) -> FancamConfig:
 
 
 def _video_info(path: Path) -> dict:
-    """Return {width, height, fps, duration_sec} via ffprobe."""
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
-         "-show_streams", str(path)],
-        capture_output=True, text=True,
-    )
+    """Return {width, height, fps, duration_sec} via ffmpeg -i (no ffprobe needed)."""
+    import re, shutil
     info = {"width": 0, "height": 0, "fps": 0.0, "duration_sec": 0.0}
-    try:
-        streams = json.loads(result.stdout).get("streams", [])
-        for s in streams:
-            if s.get("codec_type") == "video":
-                info["width"] = int(s.get("width", 0))
-                info["height"] = int(s.get("height", 0))
-                fps_str = s.get("r_frame_rate", "0/1")
-                num, den = fps_str.split("/")
-                info["fps"] = round(float(num) / float(den), 2) if float(den) else 0
-                info["duration_sec"] = float(s.get("duration", 0))
-    except Exception:
-        pass
+
+    # Prefer ffprobe if available, fall back to ffmpeg
+    probe_bin = shutil.which("ffprobe") or shutil.which("ffmpeg")
+    if not probe_bin:
+        return info
+
+    if "ffprobe" in probe_bin:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(path)],
+            capture_output=True, text=True,
+        )
+        try:
+            streams = json.loads(result.stdout).get("streams", [])
+            for s in streams:
+                if s.get("codec_type") == "video":
+                    info["width"] = int(s.get("width", 0))
+                    info["height"] = int(s.get("height", 0))
+                    fps_str = s.get("r_frame_rate", "0/1")
+                    num, den = fps_str.split("/")
+                    info["fps"] = round(float(num) / float(den), 2) if float(den) else 0
+                    info["duration_sec"] = float(s.get("duration", 0))
+        except Exception:
+            pass
+    else:
+        # Parse ffmpeg stderr: "Video: ... 1920x1080 ... 60 fps"
+        # Note: ffmpeg -i always writes to stderr; -v quiet suppresses it, so use -v error
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", str(path)],
+            capture_output=True, text=True,
+        )
+        text = result.stderr
+        m = re.search(r"(\d{2,5})x(\d{2,5})", text)
+        if m:
+            info["width"], info["height"] = int(m.group(1)), int(m.group(2))
+        m = re.search(r"([\d.]+)\s*(?:fps|tbr|tbn)", text)
+        if m:
+            info["fps"] = round(float(m.group(1)), 2)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", text)
+        if m:
+            h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            info["duration_sec"] = h * 3600 + mn * 60 + s
     return info
 
 
@@ -214,15 +240,6 @@ def download(state: dict) -> dict:
     errors: list[str] = json.loads(state.get("errors", "[]"))
     records: list[DownloadRecord] = []
 
-    # Import Pulsify VideoDownloader + JDownloaderHelper
-    try:
-        import pulsify  # side-effect: adds Pulsify/src to sys.path
-        from fetcher.downloader import VideoDownloader
-        from fetcher.jdownloader_helper import JDownloaderHelper
-    except ImportError as e:
-        errors.append(f"download: Pulsify import failed: {e}")
-        return {"downloads": "[]", "errors": json.dumps(errors)}
-
     # Import content_retriever's PixeldrainDownloader
     try:
         from downloaders.pixeldrain import PixeldrainDownloader
@@ -231,49 +248,47 @@ def download(state: dict) -> dict:
         errors.append(f"download: PixeldrainDownloader import failed: {e}")
         pd = None
 
-    jd_kwargs = {}
-    if cfg.jd_email:
-        jd_kwargs = dict(
-            jd_email=cfg.jd_email,
-            jd_password=cfg.jd_password,
-            jd_device_name=cfg.jd_device_name or None,
-        )
-
     for post_data in posts:
         post_id = post_data["post_id"]
 
-        # --- Download source videos ---
+        # --- Download source videos via yt-dlp (max quality) ---
         for idx, src_url in enumerate(post_data.get("source_urls", [])):
             clip_id = f"{post_id}_src{idx}"
             dest_dir = cfg.source_dir / post_id
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             try:
-                vd = VideoDownloader(
-                    download_dir=str(dest_dir),
-                    enable_jdownloader=cfg.use_jdownloader,
-                    **jd_kwargs,
-                )
-                result = vd.download(src_url)
-                if result.get("success"):
-                    path = Path(result["file_path"])
-                    info = _video_info(path)
+                result = subprocess.run([
+                    "yt-dlp",
+                    "--no-playlist",
+                    # Best video + best audio, no resolution cap, prefer H.264
+                    "-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best",
+                    "--merge-output-format", "mp4",
+                    "-o", str(dest_dir / "%(id)s.%(ext)s"),
+                    "--print", "after_move:filepath",
+                    src_url,
+                ], capture_output=True, text=True, timeout=300)
+
+                if result.returncode == 0:
+                    fpath = Path(result.stdout.strip().split("\n")[-1])
+                    info = _video_info(fpath)
                     records.append(DownloadRecord(
                         post_id=post_id,
                         clip_id=clip_id,
                         clip_type="source",
                         url=src_url,
-                        local_path=str(path),
-                        file_size_bytes=path.stat().st_size,
+                        local_path=str(fpath),
+                        file_size_bytes=fpath.stat().st_size,
                         duration_sec=info["duration_sec"],
                         width=info["width"],
                         height=info["height"],
                         fps=info["fps"],
-                        download_method=result.get("method", "yt-dlp"),
+                        download_method="yt-dlp",
                     ))
-                    logger.info(f"Downloaded source: {clip_id} → {path.name}")
+                    logger.info(f"Downloaded source: {clip_id} → {fpath.name} "
+                                f"{info['width']}x{info['height']}@{info['fps']}fps")
                 else:
-                    errors.append(f"download source {clip_id}: {result.get('error')}")
+                    errors.append(f"download source {clip_id}: {result.stderr[-300:]}")
             except Exception as e:
                 errors.append(f"download source {clip_id}: {e}")
 
