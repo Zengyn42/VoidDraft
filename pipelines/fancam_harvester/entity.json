@@ -1,0 +1,43 @@
+{
+  "name": "fancam_harvester",
+  "graph": {
+    "state_schema": "fancam_harvester",
+    "nodes": [
+      {
+        "id": "fetch",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "download",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "align",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "analyze",
+        "type": "DETERMINISTIC"
+      },
+      {
+        "id": "identify",
+        "type": "CLAUDE_SDK",
+        "system_prompt_files": ["identify_prompt.md"]
+      },
+      {
+        "id": "store",
+        "type": "DETERMINISTIC"
+      }
+    ],
+    "entry": "fetch",
+    "edges": [
+      {"from": "__start__", "to": "fetch"},
+      {"from": "fetch",     "to": "download"},
+      {"from": "download",  "to": "align"},
+      {"from": "align",     "to": "analyze"},
+      {"from": "analyze",   "to": "identify"},
+      {"from": "identify",  "to": "store"},
+      {"from": "store",     "to": "__end__"}
+    ]
+  }
+}

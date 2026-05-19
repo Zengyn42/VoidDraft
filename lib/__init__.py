@@ -1,0 +1,1 @@
+# VoidDraft shared library
