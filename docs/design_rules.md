@@ -101,12 +101,35 @@ asa@Hfv9X8yZkoY]-1.mp4   →  YouTube ID: Hfv9X8yZkoY
 - clip 是有音频的横屏视频，且和 source 同机位/同源
 - 文件名含 YouTube ID 仅说明这场演出的 source 视频，不代表 clip 从 source 截取
 
-**对齐策略**：
-- 主策略：音频指纹（librosa chroma features，滑动窗口互相关）
-- Fallback：视觉帧匹配（OpenCV SSIM）— 用于无音轨片段
-- 无音轨 clip 直接跳到视觉对齐
+**对齐策略（auto 模式，依次尝试）**：
+1. 音频指纹（librosa chroma features，滑动窗口互相关）— 有音轨时优先
+2. Motion 对齐（Pulsify YOLOAnalyzer，COCO 17 关键点 → torso-normalized 姿态向量，余弦相似度滑窗）— 仅限舞蹈类 clip
+3. 视觉帧匹配（OpenCV SSIM）— 最后兜底
 - 置信度低于阈值 → 标记 `unmatched`，clip 作为独立素材保存（不丢弃）
 - **大多数手机 fancam clip 会以 `unmatched` 状态进入存储层**，这是正常的
+
+**Dance 分类（`is_dance_clip(title, filename)`）**：
+- 含 직캠/fancam/stage/무대/showcase/音乐节目名 等关键词 → 舞蹈类，尝试 motion 对齐
+- 含 vlog/interview/behind/mukbang 等关键词 → 非舞蹈，跳过 motion 对齐
+- 无明确关键词 → 默认视为舞蹈（r/kpopfap 场景下 90%+ 是舞台）
+- 实现：`fancam_harvester/align/__init__.py: is_dance_clip()`
+
+**Motion + Crop 两阶段对齐（`pulsify.align.motion_align.find_offset`）**：
+
+*Stage 1 — 动作粗筛*
+- 2fps 采样，YOLO 提取 COCO 17 关键点
+- 姿态归一化：mid-hip 为原点，肩髋距为尺度，仅 body 关键点（5–16），置信度加权
+- 滑动窗口余弦相似度 → 筛出 top-K 候选偏移（默认 K=5）
+
+*Stage 2 — Person Crop 外观验证*
+- 对 top-K 候选，在对应时间戳提取帧（默认每候选 5 帧）
+- 用 YOLO bounding box 裁剪出 person crop（portrait clip 无 bbox 时取全帧）
+- 统一 resize 到 128×256，计算 HSV 颜色直方图交集（对同一场演出同一套装有效）
+- combined = motion_sim × crop_sim
+
+- 置信度 combined < 0.40 → AlignmentError → 标记 `unmatched`
+- YOLO 默认 `yolo11n-pose.pt`（6MB nano，速度优先）
+- 结构：`MotionAlignResult(offset_sec, confidence, motion_score, crop_score)`
 
 ---
 
