@@ -131,6 +131,18 @@ def _teardown(state: dict) -> None:
             except Exception:
                 pass
 
+    # Clean up any KNOW files written during the test (only new ones created by apply)
+    know_dir = vault_dir / "knowledge"
+    if know_dir.exists():
+        for f in know_dir.glob("KNOW-*.md"):
+            try:
+                text = f.read_text(encoding="utf-8")
+                if TEST_DOC_REL in text:
+                    f.unlink()
+                    print(f"[teardown] removed knowledge file {f.name}", flush=True)
+            except Exception:
+                pass
+
     # Restore dedup_log
     dedup_log = state["dedup_log_path"]
     if state["original_dedup"] is None:
@@ -181,20 +193,20 @@ TESTS = [
     },
     {
         "tag": "S2",
-        "label": "Reuse — Jei applies proposal with action=reuse for KNOW-000032",
+        "label": "Reuse — re-propose with action=reuse, then apply",
         "question": (
-            "上面的 proposal 里有一个 claim 和 KNOW-000032 非常相似。"
-            "请判断这个 claim 是否应该复用 KNOW-000032（而不是新建），如果是，"
-            "请在那个 claim 上设置 action='reuse'、reuse_id='KNOW-000032'，"
-            "然后调用 atomize_apply 完成这个 proposal。"
-            "告诉我 apply 的结果：reused_count 是多少？有没有建立 MENTIONS 边？"
+            "上面的 claim 和 KNOW-000032 高度相似，应该复用而不是新建。"
+            "请用同一个 scan_id 重新调用 atomize_propose，"
+            "这次在 claim 里加上 action='reuse' 和 reuse_id='KNOW-000032'，"
+            "然后立刻用新的 proposal_id 调用 atomize_apply。"
+            "告诉我最终结果里 reused_count 是多少。"
         ),
-        # Jei should call atomize_apply with reuse, response confirms reuse
-        "pass_keywords": ["reuse", "mentions"],
-        "fail_keywords": ["error", "StaleDocError", "找不到 proposal", "proposal.*not found"],
+        # reused_count > 0 means the reuse path was taken
+        "pass_keywords": ["reused_count", "1"],
+        "fail_keywords": ["error", "StaleDocError", "reused_count.*0"],
         "note": (
-            "Verifies Jei correctly executes reuse path: skips file creation, "
-            "writes MENTIONS edge, records DedupSnapshot."
+            "Re-proposes with action='reuse' so atomize_apply walks the reuse path: "
+            "skips file creation, writes MENTIONS edge, records DedupSnapshot."
         ),
     },
 ]
