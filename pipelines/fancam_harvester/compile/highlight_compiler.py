@@ -27,9 +27,8 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 try:
-    import pulsify  # noqa — side effect: adds Pulsify/src to sys.path
-    from merge.renderer import Renderer
-    from merge.timeline_builder import Timeline, TimelineSegment
+    from pulsify.merge.renderer import Renderer
+    from pulsify.merge.timeline_builder import Timeline, TimelineSegment
     _PULSIFY_AVAILABLE = True
 except ImportError:
     _PULSIFY_AVAILABLE = False

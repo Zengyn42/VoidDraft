@@ -111,52 +111,9 @@ def _load_config(state: dict) -> FancamConfig:
 
 
 def _video_info(path: Path) -> dict:
-    """Return {width, height, fps, duration_sec} via ffmpeg -i (no ffprobe needed)."""
-    import re, shutil
-    info = {"width": 0, "height": 0, "fps": 0.0, "duration_sec": 0.0}
-
-    # Prefer ffprobe if available, fall back to ffmpeg
-    probe_bin = shutil.which("ffprobe") or shutil.which("ffmpeg")
-    if not probe_bin:
-        return info
-
-    if "ffprobe" in probe_bin:
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
-             "-show_streams", str(path)],
-            capture_output=True, text=True,
-        )
-        try:
-            streams = json.loads(result.stdout).get("streams", [])
-            for s in streams:
-                if s.get("codec_type") == "video":
-                    info["width"] = int(s.get("width", 0))
-                    info["height"] = int(s.get("height", 0))
-                    fps_str = s.get("r_frame_rate", "0/1")
-                    num, den = fps_str.split("/")
-                    info["fps"] = round(float(num) / float(den), 2) if float(den) else 0
-                    info["duration_sec"] = float(s.get("duration", 0))
-        except Exception:
-            pass
-    else:
-        # Parse ffmpeg stderr: "Video: ... 1920x1080 ... 60 fps"
-        # Note: ffmpeg -i always writes to stderr; -v quiet suppresses it, so use -v error
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-i", str(path)],
-            capture_output=True, text=True,
-        )
-        text = result.stderr
-        m = re.search(r"(\d{2,5})x(\d{2,5})", text)
-        if m:
-            info["width"], info["height"] = int(m.group(1)), int(m.group(2))
-        m = re.search(r"([\d.]+)\s*(?:fps|tbr|tbn)", text)
-        if m:
-            info["fps"] = round(float(m.group(1)), 2)
-        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", text)
-        if m:
-            h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-            info["duration_sec"] = h * 3600 + mn * 60 + s
-    return info
+    """Delegate to pulsify.utils.video_info."""
+    from pulsify.utils.video_info import get_video_info
+    return get_video_info(path)
 
 
 def _extract_pixeldrain_links(text: str) -> list[str]:
@@ -240,66 +197,49 @@ def download(state: dict) -> dict:
     errors: list[str] = json.loads(state.get("errors", "[]"))
     records: list[DownloadRecord] = []
 
-    # Import content_retriever's PixeldrainDownloader
-    try:
-        from downloaders.pixeldrain import PixeldrainDownloader
-        pd = PixeldrainDownloader(api_key=cfg.pixeldrain_api_key or None)
-    except ImportError as e:
-        errors.append(f"download: PixeldrainDownloader import failed: {e}")
-        pd = None
+    from pulsify.fetcher.url_downloader import download_urls, DownloadResult
+    from downloaders.pixeldrain import PixeldrainDownloader
+
+    pd = PixeldrainDownloader(api_key=cfg.pixeldrain_api_key or None)
 
     for post_data in posts:
         post_id = post_data["post_id"]
 
-        # --- Download source videos via yt-dlp (max quality) ---
-        for idx, src_url in enumerate(post_data.get("source_urls", [])):
-            clip_id = f"{post_id}_src{idx}"
+        # --- Download ALL source videos (pre-checked for duration) ---
+        src_urls = post_data.get("source_urls", [])
+        if src_urls:
             dest_dir = cfg.source_dir / post_id
-            dest_dir.mkdir(parents=True, exist_ok=True)
-
-            try:
-                result = subprocess.run([
-                    "yt-dlp",
-                    "--no-playlist",
-                    # Best video + best audio, no resolution cap, prefer H.264
-                    "-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best",
-                    "--merge-output-format", "mp4",
-                    "-o", str(dest_dir / "%(id)s.%(ext)s"),
-                    "--print", "after_move:filepath",
-                    src_url,
-                ], capture_output=True, text=True, timeout=300)
-
-                if result.returncode == 0:
-                    fpath = Path(result.stdout.strip().split("\n")[-1])
-                    info = _video_info(fpath)
+            results = download_urls(
+                urls=src_urls,
+                dest_dir=dest_dir,
+                max_duration_sec=300.0,  # skip videos > 5 min
+            )
+            for idx, r in enumerate(results):
+                clip_id = f"{post_id}_src{idx}"
+                if r.skipped:
+                    errors.append(f"source {clip_id} skipped: {r.skip_reason}")
+                elif not r.success:
+                    errors.append(f"source {clip_id} failed: {r.error}")
+                else:
                     records.append(DownloadRecord(
                         post_id=post_id,
                         clip_id=clip_id,
                         clip_type="source",
-                        url=src_url,
-                        local_path=str(fpath),
-                        file_size_bytes=fpath.stat().st_size,
-                        duration_sec=info["duration_sec"],
-                        width=info["width"],
-                        height=info["height"],
-                        fps=info["fps"],
+                        url=r.url,
+                        local_path=str(r.local_path),
+                        file_size_bytes=r.file_size_bytes,
+                        duration_sec=r.duration_sec,
+                        width=r.width,
+                        height=r.height,
+                        fps=r.fps,
                         download_method="yt-dlp",
                     ))
-                    logger.info(f"Downloaded source: {clip_id} → {fpath.name} "
-                                f"{info['width']}x{info['height']}@{info['fps']}fps")
-                else:
-                    errors.append(f"download source {clip_id}: {result.stderr[-300:]}")
-            except Exception as e:
-                errors.append(f"download source {clip_id}: {e}")
 
         # --- Download pixeldrain clips ---
-        if pd is None:
-            continue
         for idx, pd_url in enumerate(post_data.get("pixeldrain_urls", [])):
             clip_id = f"{post_id}_clip{idx}"
             dest_dir = cfg.clips_dir / post_id
             dest_dir.mkdir(parents=True, exist_ok=True)
-
             try:
                 downloaded = pd.download(pd_url, dest_dir)
                 for path in downloaded:
@@ -317,9 +257,8 @@ def download(state: dict) -> dict:
                         fps=info["fps"],
                         download_method="pixeldrain",
                     ))
-                    logger.info(f"Downloaded clip: {path.name}")
             except Exception as e:
-                errors.append(f"download clip {clip_id}: {e}")
+                errors.append(f"clip {clip_id}: {e}")
 
     return {
         "downloads": json.dumps([asdict(r) for r in records]),
@@ -427,8 +366,7 @@ def analyze(state: dict) -> dict:
 
     # Pulsify imports
     try:
-        import pulsify  # noqa — side-effect: sets sys.path
-        from video_clipper import VideoClipper
+        from pulsify.video_clipper import VideoClipper
         clipper = VideoClipper()
     except ImportError as e:
         errors.append(f"analyze: VideoClipper import failed: {e}")
@@ -436,8 +374,7 @@ def analyze(state: dict) -> dict:
 
     # Try to import YOLO pose analyzer (optional; skip if not installed)
     try:
-        import pulsify  # noqa
-        from analyzer.pose.yolo import YOLOAnalyzer
+        from pulsify.analyzer.pose.yolo import YOLOAnalyzer
         pose_analyzer = YOLOAnalyzer(device="cpu")
     except Exception:
         pose_analyzer = None
