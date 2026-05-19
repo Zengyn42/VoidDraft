@@ -33,20 +33,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _video_duration(video_path: Path) -> float:
-    """Return duration in seconds using ffprobe."""
-    import json
+    """Return duration in seconds using ffmpeg (no ffprobe needed)."""
+    import re
     result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
-         "-show_streams", str(video_path)],
+        ["ffmpeg", "-hide_banner", "-i", str(video_path)],
         capture_output=True, text=True
     )
-    try:
-        data = json.loads(result.stdout)
-        for stream in data.get("streams", []):
-            if "duration" in stream:
-                return float(stream["duration"])
-    except Exception:
-        pass
+    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", result.stderr)
+    if m:
+        h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        return h * 3600 + mn * 60 + s
     return 60.0  # fallback
 
 

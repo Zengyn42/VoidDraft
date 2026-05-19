@@ -1,24 +1,21 @@
 """
-Audio fingerprint alignment — find where a clip appears in the source video.
+Audio-based clip-to-source alignment via librosa chroma features.
 
 Strategy:
-  1. Extract audio from both source and clip (FFmpeg → WAV)
-  2. Generate chromaprint fingerprints
-  3. Slide a window of clip-length over the source, compute fingerprint
-     similarity at each position
-  4. Return the offset (seconds) with the highest similarity
+  1. Extract audio from both source and clip (FFmpeg → WAV mono 22050Hz)
+  2. Compute chroma features (12-bin pitch class profiles) for both
+  3. Slide a window of clip-length over the source chroma matrix
+  4. Cross-correlate each window with clip chroma → find best offset
+
+Does NOT require fpcalc / libchromaprint — pure Python via librosa.
 
 Dependencies:
-    pip install chromaprint-python  # or fpcalc binary on PATH
+    pip install librosa
     ffmpeg on PATH
-
-Fallback: if chromaprint is unavailable, raises AlignmentError so
-          visual_match.py can be tried instead.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import tempfile
@@ -26,11 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
 class AlignmentError(Exception):
-    """Raised when fingerprint alignment fails or is unavailable."""
+    """Raised when audio alignment fails or confidence is too low."""
 
 
 @dataclass
@@ -41,55 +40,42 @@ class AlignResult:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _extract_audio(video_path: Path, out_wav: Path, duration: Optional[float] = None) -> None:
-    """Extract mono 22050 Hz WAV from video using FFmpeg."""
-    cmd = [
+def _extract_wav(video_path: Path, out_wav: Path, sr: int = 22050) -> None:
+    """Extract mono WAV at `sr` Hz from video using FFmpeg."""
+    result = subprocess.run([
         "ffmpeg", "-y", "-i", str(video_path),
-        "-vn", "-ac", "1", "-ar", "22050",
-        "-f", "wav",
-    ]
-    if duration:
-        cmd += ["-t", str(duration)]
-    cmd.append(str(out_wav))
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise AlignmentError(f"ffmpeg audio extract failed: {result.stderr.decode()[:200]}")
-
-
-def _get_fingerprint(wav_path: Path) -> list[int]:
-    """
-    Run fpcalc (chromaprint CLI) and return the raw fingerprint as int list.
-    fpcalc must be installed: sudo apt install libchromaprint-tools
-    """
-    result = subprocess.run(
-        ["fpcalc", "-raw", "-json", str(wav_path)],
-        capture_output=True, text=True
-    )
+        "-vn", "-ac", "1", "-ar", str(sr),
+        "-f", "wav", str(out_wav)
+    ], capture_output=True)
     if result.returncode != 0:
         raise AlignmentError(
-            f"fpcalc failed (is chromaprint-tools installed?): {result.stderr[:200]}"
+            f"ffmpeg audio extract failed: {result.stderr.decode()[:200]}"
         )
-    data = json.loads(result.stdout)
-    return data["fingerprint"]
 
 
-def _bit_error_rate(fp_a: list[int], fp_b: list[int]) -> float:
+def _chroma(audio: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
+    """Compute normalised chroma feature matrix (12 x T)."""
+    import librosa
+    c = librosa.feature.chroma_cqt(y=audio, sr=sr, hop_length=hop_length)
+    # Normalise each frame to unit L2 norm
+    norms = np.linalg.norm(c, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    return c / norms
+
+
+def _chroma_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
-    Compute bit error rate between two fingerprints of the same length.
-    Returns 0.0 (identical) … 1.0 (completely different).
+    Mean frame-wise cosine similarity between two chroma matrices.
+    Both must have the same number of columns (time frames).
     """
-    length = min(len(fp_a), len(fp_b))
-    if length == 0:
-        return 1.0
-    diff_bits = sum(bin(a ^ b).count("1") for a, b in zip(fp_a[:length], fp_b[:length]))
-    return diff_bits / (length * 32)
-
-
-def _similarity(fp_a: list[int], fp_b: list[int]) -> float:
-    return 1.0 - _bit_error_rate(fp_a, fp_b)
+    min_t = min(a.shape[1], b.shape[1])
+    if min_t == 0:
+        return 0.0
+    dots = np.sum(a[:, :min_t] * b[:, :min_t], axis=0)  # (T,)
+    return float(np.mean(dots))
 
 
 # ---------------------------------------------------------------------------
@@ -101,97 +87,77 @@ def find_offset(
     clip_video: Path,
     step_sec: float = 2.0,
     min_confidence: float = 0.5,
+    sr: int = 22050,
+    hop_length: int = 512,
 ) -> AlignResult:
     """
-    Find where `clip_video` starts inside `source_video` by audio fingerprinting.
+    Find where `clip_video` starts inside `source_video` using chroma features.
 
     Args:
-        source_video: Full concert/fancam video.
-        clip_video:   Short clip extracted from the source.
-        step_sec:     Sliding-window step in seconds.
-        min_confidence: If best match is below this, raise AlignmentError.
+        source_video:   Full concert/fancam video.
+        clip_video:     Short clip to locate.
+        step_sec:       Sliding window step in seconds.
+        min_confidence: If best similarity < this, raise AlignmentError.
+        sr:             Sample rate for audio extraction.
+        hop_length:     Hop length for chroma computation.
 
     Returns:
-        AlignResult with offset_sec and confidence.
+        AlignResult(offset_sec, confidence, method="audio")
 
     Raises:
-        AlignmentError: if chromaprint tools unavailable or confidence too low.
+        AlignmentError: if no audio or confidence below threshold.
     """
-    import shutil
-    if not shutil.which("fpcalc"):
-        raise AlignmentError("fpcalc binary not found — install chromaprint-tools")
+    import librosa
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-
-        # Extract full source audio + clip audio
-        source_wav = tmp / "source.wav"
+        src_wav = tmp / "source.wav"
         clip_wav = tmp / "clip.wav"
-        _extract_audio(source_video, source_wav)
-        _extract_audio(clip_video, clip_wav)
 
-        clip_fp = _get_fingerprint(clip_wav)
-        clip_len_fp = len(clip_fp)
+        _extract_wav(source_video, src_wav, sr)
+        _extract_wav(clip_video, clip_wav, sr)
 
-        if clip_len_fp == 0:
-            raise AlignmentError("Clip fingerprint is empty — clip may have no audio")
+        src_audio, _ = librosa.load(str(src_wav), sr=sr, mono=True)
+        clip_audio, _ = librosa.load(str(clip_wav), sr=sr, mono=True)
 
-        # Get clip duration from fingerprint length
-        # fpcalc encodes ~8.27ms per fingerprint element (chromaprint default)
-        fp_frame_sec = 8.27e-3
-        clip_duration = clip_len_fp * fp_frame_sec
+    if len(clip_audio) < sr:
+        raise AlignmentError("Clip audio too short (< 1s) for fingerprinting")
 
-        logger.debug(
-            f"Source: {source_video.name}, Clip: {clip_video.name}, "
-            f"clip_duration≈{clip_duration:.1f}s, step={step_sec}s"
+    src_chroma = _chroma(src_audio, sr, hop_length)
+    clip_chroma = _chroma(clip_audio, sr, hop_length)
+
+    clip_frames = clip_chroma.shape[1]
+    step_frames = max(1, int(step_sec * sr / hop_length))
+    total_source_frames = src_chroma.shape[1]
+
+    logger.debug(
+        f"Source: {total_source_frames} frames, Clip: {clip_frames} frames, "
+        f"step: {step_frames} frames"
+    )
+
+    best_offset = 0.0
+    best_sim = 0.0
+    frames_per_sec = sr / hop_length
+
+    t = 0
+    while t + clip_frames <= total_source_frames:
+        window = src_chroma[:, t:t + clip_frames]
+        sim = _chroma_similarity(window, clip_chroma)
+        if sim > best_sim:
+            best_sim = sim
+            best_offset = t / frames_per_sec
+            logger.debug(f"  t={best_offset:.1f}s sim={sim:.3f}")
+        if sim > 0.95:
+            break  # early exit on high confidence
+        t += step_frames
+
+    if best_sim < min_confidence:
+        raise AlignmentError(
+            f"Best chroma similarity {best_sim:.3f} < threshold {min_confidence}"
         )
 
-        # Slide window over source audio in `step_sec` chunks
-        best_offset = 0.0
-        best_sim = 0.0
-
-        # Get source duration
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
-             "-show_streams", str(source_video)],
-            capture_output=True, text=True
-        )
-        import re
-        dur_match = re.search(r'"duration":\s*"([0-9.]+)"', probe.stdout)
-        source_duration = float(dur_match.group(1)) if dur_match else 3600.0
-
-        offset = 0.0
-        while offset + clip_duration <= source_duration:
-            window_wav = tmp / f"window_{int(offset)}.wav"
-            _extract_audio(source_video, window_wav, duration=clip_duration + step_sec)
-            try:
-                window_fp = _get_fingerprint(window_wav)
-            except AlignmentError:
-                offset += step_sec
-                continue
-
-            # Trim window fingerprint to clip length for comparison
-            sim = _similarity(clip_fp, window_fp[:clip_len_fp])
-            if sim > best_sim:
-                best_sim = sim
-                best_offset = offset
-                logger.debug(f"  offset={offset:.1f}s sim={sim:.3f}")
-
-            # Early exit if very high confidence
-            if sim > 0.95:
-                break
-
-            offset += step_sec
-            # Clean up intermediate wav to save disk
-            window_wav.unlink(missing_ok=True)
-
-        if best_sim < min_confidence:
-            raise AlignmentError(
-                f"Best audio similarity {best_sim:.3f} below threshold {min_confidence}"
-            )
-
-        logger.info(
-            f"Audio aligned: {clip_video.name} → offset={best_offset:.2f}s "
-            f"confidence={best_sim:.3f}"
-        )
-        return AlignResult(offset_sec=best_offset, confidence=best_sim, method="audio")
+    logger.info(
+        f"Audio aligned: {clip_video.name} → offset={best_offset:.2f}s "
+        f"confidence={best_sim:.3f}"
+    )
+    return AlignResult(offset_sec=best_offset, confidence=best_sim, method="audio")
