@@ -1,227 +1,337 @@
 """
-小红书 (RedNote) source — keyword search + user profile scraping.
+小红书 (RedNote) source — profile & favorites scraping via Playwright.
 
-Media download is handled by the pipeline via yt-dlp (bypasses CDN hotlink protection).
-This module is responsible for:
-  1. Building search / listing URLs
-  2. Using Scrapling StealthyFetcher with scroll for lazy-loaded content
-  3. Fetching post links, title, and body text per post
-  4. Exposing image/video URLs to the pipeline for yt-dlp download
+Modes:
+  - favorites (default): user's saved/collected notes via ?tab=fav&subTab=note
+    Uses API interception of note/collect/page — returns xsec_token directly.
+  - posted: user's own published notes (DOM-based, SSR-rendered)
+  - target_url: directly specified listing URL (DOM-based)
+  - search_keyword: keyword search on xiaohongshu.com (DOM-based)
 
-Cookie persistence is achieved via user_data_dir (Chrome profile directory).
+Cookies are injected at runtime — no persistent Chrome profile needed.
 """
 
+from __future__ import annotations
+
+import asyncio
 import re
 import time
 from typing import Iterator
-from urllib.parse import quote, urlparse
-
-from scrapling.fetchers import StealthyFetcher
 
 from .base import Post, PlatformSource
 
 _XHS_BASE = "https://www.xiaohongshu.com"
-_SEARCH_URL = "https://www.xiaohongshu.com/search_result?keyword={kw}&type=51"
+_REDNOTE_BASE = "https://www.rednote.com"
+_CHROME_BIN = "/usr/bin/google-chrome"
+
+# Default credentials directory (under EdenGateway, not in source code)
+_DEFAULT_CREDS_DIR = "/home/kingy/Foundation/EdenGateway/rednote/accounts"
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def _extract_post_id(url: str) -> str:
-    match = re.search(r"/explore/([a-zA-Z0-9]+)", url)
-    return match.group(1) if match else urlparse(url).path.rstrip("/").split("/")[-1]
-
-
-def _absolute_url(href: str) -> str:
-    if href.startswith("http"):
-        return href
-    if href.startswith("//"):
-        return "https:" + href
-    return _XHS_BASE + href
-
-
-def _make_scroll_action(scroll_count: int, wait_ms: int = 2500):
+def _load_cookies(credentials_file: str | None) -> list[dict]:
     """
-    Returns a page_action function that scrolls scroll_count times
-    on a Playwright page, waiting wait_ms ms per scroll to trigger lazy-loading.
+    Load cookies from a JSON credentials file.
+
+    The file lives under EdenGateway/rednote/accounts/<name>.json and contains:
+      {
+        "account_id": "...",
+        "cookies": [ {name, value, domain, path, secure, httpOnly}, ... ]
+      }
+
+    If credentials_file is None or missing, returns [] and Playwright will
+    run without auth (useful for public profiles).
     """
-    def _action(page):
-        for _ in range(scroll_count):
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(wait_ms)
-    return _action
+    import json, pathlib
+
+    if not credentials_file:
+        return []
+
+    path = pathlib.Path(credentials_file)
+    if not path.is_absolute():
+        path = pathlib.Path(_DEFAULT_CREDS_DIR) / path
+
+    if not path.exists():
+        print(f"[rednote] WARNING: credentials file not found: {path}")
+        return []
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    cookies = data.get("cookies", [])
+    print(f"[rednote] Loaded {len(cookies)} cookies from {path.name}")
+    return cookies
 
 
-# ─── Source class ─────────────────────────────────────────────────────────────
+def _rednote_to_xhs(url: str) -> str:
+    """Convert rednote.com URL to xiaohongshu.com (shared backend)."""
+    return url.replace("www.rednote.com", "www.xiaohongshu.com")
+
+
+def _extract_note_id(url: str) -> str | None:
+    m = re.search(r"(?:explore|discovery/item)/([0-9a-f]+)", url)
+    return m.group(1) if m else None
+
 
 class RedNoteSource(PlatformSource):
     """
-    小红书 content source. Supports two modes:
-      - search_keyword: keyword search, fetches top results
-      - target_url: directly specified user profile or listing URL
+    小红书 content source using Playwright (no persistent Chrome profile needed).
 
-    Both can be set simultaneously; search_keyword takes priority.
+    Args:
+        user_data_dir: Unused (kept for config compat). Cookies are injected directly.
+        account_user_id: User ID to scrape.
+        mode: "favorites" (saved notes) | "posted" (published notes) | "target_url" | "search"
+        target_url: Direct listing URL (used when mode="target_url").
+        search_keyword: Keyword (used when mode="search").
+        max_scroll: Scroll rounds for pagination.
+        request_delay: Seconds between yielded posts.
+        video_only: If True, skip image-only posts.
     """
 
     def __init__(
         self,
-        user_data_dir: str,
-        search_keyword: str | None = None,
+        user_data_dir: str = "",
+        account_user_id: str | None = None,
+        mode: str = "favorites",
         target_url: str | None = None,
-        request_delay: float = 2.0,
-        max_scroll: int = 5,
+        search_keyword: str | None = None,
+        max_scroll: int = 20,
+        request_delay: float = 1.5,
+        video_only: bool = True,
+        credentials_file: str | None = None,
     ) -> None:
-        if not search_keyword and not target_url:
-            raise ValueError("RedNoteSource: must specify search_keyword or target_url")
-
         self.user_data_dir = user_data_dir
-        self.search_keyword = search_keyword
+        self.account_user_id = account_user_id
+        self.mode = mode
         self.target_url = target_url
-        self.request_delay = request_delay
+        self.search_keyword = search_keyword
         self.max_scroll = max_scroll
-
-    # ── Build entry URL ───────────────────────────────────────────────────────
+        self.request_delay = request_delay
+        self.video_only = video_only
+        # Load cookies from EdenGateway credentials file (not hardcoded)
+        self._cookies = _load_cookies(credentials_file)
 
     def _build_index_url(self) -> str:
-        if self.search_keyword:
-            encoded = quote(self.search_keyword)
-            url = _SEARCH_URL.format(kw=encoded)
-            print(f"[rednote] Search keyword: {self.search_keyword!r}")
-            print(f"[rednote] URL: {url}")
-            return url
-        return self.target_url  # type: ignore[return-value]
+        uid = self.account_user_id or ""
+        if self.mode == "favorites":
+            return f"{_REDNOTE_BASE}/user/profile/{uid}?tab=fav&subTab=note"
+        if self.mode == "posted":
+            return f"{_REDNOTE_BASE}/user/profile/{uid}"
+        if self.mode == "target_url" and self.target_url:
+            return self.target_url
+        if self.mode == "search" and self.search_keyword:
+            from urllib.parse import quote
+            return f"{_XHS_BASE}/search_result?keyword={quote(self.search_keyword)}&type=51"
+        raise ValueError(f"RedNoteSource: invalid mode={self.mode!r} or missing params")
 
-    # ── Scrapling fetch ───────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Favorites mode: intercept note/collect/page API responses
+    # ------------------------------------------------------------------
+    async def _collect_favorites_async(self, index_url: str, max_posts: int) -> list[dict]:
+        """
+        Navigate to ?tab=fav&subTab=note, intercept note/collect/page API responses.
+        Scroll to trigger pagination. Returns list of post info dicts with xsec_token.
+        """
+        from playwright.async_api import async_playwright
 
-    def _fetch_with_scroll(self, url: str) -> object:
-        """Load page and scroll max_scroll times to trigger lazy-loading."""
-        print(f"[rednote] Loading page (scrolling {self.max_scroll} times)...")
-        page = StealthyFetcher.fetch(
-            url,
-            user_data_dir=self.user_data_dir,
-            headless=True,
-            network_idle=True,
-            timeout=90000,
-            page_action=_make_scroll_action(self.max_scroll),
-        )
-        return page
+        collected: dict[str, dict] = {}
+        has_more = True
 
-    def _fetch_post(self, url: str) -> object:
-        """Load a single post page (no scrolling needed)."""
-        return StealthyFetcher.fetch(
-            url,
-            user_data_dir=self.user_data_dir,
-            headless=True,
-            network_idle=True,
-            timeout=60000,
-        )
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                executable_path=_CHROME_BIN,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = await browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                service_workers="block",
+            )
+            page = await ctx.new_page()
+            await ctx.add_cookies(self._cookies)
 
-    # ── Link extraction ───────────────────────────────────────────────────────
+            # Capture note/collect/page API responses
+            async def on_response(resp):
+                nonlocal has_more
+                if "note/collect/page" not in resp.url:
+                    return
+                try:
+                    body = await resp.json()
+                    data = body.get("data", {})
+                    notes = data.get("notes", [])
+                    has_more = data.get("has_more", False)
+                    print(f"[rednote][api] collect/page: {len(notes)} notes, has_more={has_more}")
+                    for note in notes:
+                        note_id = note.get("note_id", "")
+                        if not note_id or note_id in collected:
+                            continue
+                        xsec = note.get("xsec_token", "")
+                        title = note.get("display_title", "") or note_id
+                        note_type = str(note.get("type", "")).lower()
+                        xhs_url = (
+                            f"{_XHS_BASE}/explore/{note_id}"
+                            + (f"?xsec_token={xsec}" if xsec else "")
+                        )
+                        collected[note_id] = {
+                            "id": note_id,
+                            "title": title[:80],
+                            "url": xhs_url,
+                            "type": note_type,
+                        }
+                except Exception as e:
+                    print(f"[rednote][api] parse error: {e}")
 
-    def _collect_post_links(self, page, max_posts: int) -> list[str]:
-        """Extract post URLs from listing/search results in ranking order."""
-        seen: set[str] = set()
-        links: list[str] = []
+            page.on("response", on_response)
 
-        # 小红书 search results and user profiles use /explore/{id} format
-        anchors = page.css("a[href*='/explore/']")
-        for anchor in anchors:
-            href = anchor.attrib.get("href", "")
-            if not href:
-                continue
-            abs_url = _absolute_url(href).split("?")[0].split("#")[0]
-            if abs_url not in seen:
-                seen.add(abs_url)
-                links.append(abs_url)
-                if len(links) >= max_posts:
+            print(f"[rednote] Loading favorites: {index_url}")
+            try:
+                await page.goto(index_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"[rednote] Page load warning: {e}")
+            await asyncio.sleep(8)  # Wait for initial API call
+
+            print(f"[rednote] Page title: {await page.title()}")
+
+            # Scroll to trigger pagination
+            no_change = 0
+            for i in range(self.max_scroll):
+                if len(collected) >= max_posts or not has_more:
+                    break
+                prev = len(collected)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(3)
+                print(f"[rednote] Scroll {i+1}/{self.max_scroll} — {len(collected)} posts")
+                no_change = 0 if len(collected) > prev else no_change + 1
+                if no_change >= 3:
+                    print("[rednote] No new posts after 3 scrolls, stopping")
                     break
 
-        print(f"[rednote] Found {len(links)} post link(s)")
-        return links
+            await ctx.close()
+            await browser.close()
 
-    # ── Single post content extraction ───────────────────────────────────────
+        return list(collected.values())[:max_posts]
 
-    def _scrape_post(self, post_url: str) -> "Post | None":
-        post_id = _extract_post_id(post_url)
-        try:
-            page = self._fetch_post(post_url)
-        except Exception as exc:
-            print(f"[rednote] Post load failed {post_url}: {exc}")
-            return None
+    # ------------------------------------------------------------------
+    # Posted / DOM mode: extract links from profile page HTML (SSR)
+    # ------------------------------------------------------------------
+    async def _collect_dom_async(self, index_url: str, max_posts: int) -> list[dict]:
+        """
+        Scroll listing page, extract note links with xsec_token from DOM.
+        Works for posted mode and target_url mode.
+        """
+        from playwright.async_api import async_playwright
 
-        # Title
-        title = ""
-        for sel in ("h1", ".title", "[class*='title']", "meta[property='og:title']"):
-            el = page.css_first(sel)
-            if el:
-                title = (el.attrib.get("content") or el.inner_text() or "").strip()
-                if title:
+        collected: dict[str, dict] = {}
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                executable_path=_CHROME_BIN,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = await browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                service_workers="block",
+            )
+            page = await ctx.new_page()
+            await ctx.add_cookies(self._cookies)
+
+            print(f"[rednote] Loading: {index_url}")
+            try:
+                await page.goto(index_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"[rednote] Page load warning: {e}")
+            await asyncio.sleep(5)
+            print(f"[rednote] Page title: {await page.title()}")
+
+            no_change = 0
+            for i in range(self.max_scroll):
+                if len(collected) >= max_posts:
                     break
+                prev = len(collected)
 
-        # Body text
-        text = ""
-        for sel in (".note-text", ".desc", "[class*='desc']", "#detail-desc", ".content"):
-            el = page.css_first(sel)
-            if el:
-                text = (el.inner_text() or "").strip()
-                if text:
+                # Profile page: cover anchors have xsec_token in href
+                dom_links = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('a[href*="xsec_token"]'))
+                        .map(a => a.href)
+                        .filter(h => h.includes('/explore/') || h.includes('/profile/'))
+                """)
+                if i == 0:
+                    print(f"[rednote] Sample DOM links: {dom_links[:2]}")
+                for link in dom_links:
+                    m = re.search(r"(?:explore/|profile/[^/]+/)([0-9a-f]{24})", link)
+                    if not m:
+                        continue
+                    note_id = m.group(1)
+                    if note_id in collected:
+                        continue
+                    m_tok = re.search(r"xsec_token=([^&]+)", link)
+                    xsec = m_tok.group(1) if m_tok else ""
+                    xhs_url = (
+                        f"{_XHS_BASE}/explore/{note_id}"
+                        + (f"?xsec_token={xsec}" if xsec else "")
+                    )
+                    collected[note_id] = {
+                        "id": note_id, "title": note_id,
+                        "url": xhs_url, "type": "unknown",
+                    }
+
+                print(f"[rednote] Scroll {i+1}/{self.max_scroll} — {len(collected)} posts")
+                no_change = 0 if len(collected) > prev else no_change + 1
+                if no_change >= 3:
+                    print("[rednote] No new posts after 3 rounds, stopping")
                     break
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(3)
 
-        # Image URLs (for reference; actual download uses yt-dlp)
-        image_urls: list[str] = []
-        for img in page.css(
-            "img[src*='xhscdn'], img[src*='ci.xiaohongshu'], img[src*='sns-webpic']"
-        ):
-            src = img.attrib.get("src", "")
-            if src and src not in image_urls:
-                image_urls.append(src)
+            await ctx.close()
+            await browser.close()
 
-        # Video URLs
-        video_urls: list[str] = []
-        for sel in ("video source[src]", "video[src]"):
-            for el in page.css(sel):
-                src = el.attrib.get("src", "")
-                if src and src not in video_urls:
-                    video_urls.append(src)
+        return list(collected.values())[:max_posts]
 
-        print(
-            f"[rednote] Post {post_id}: title={title[:30]!r}, "
-            f"imgs={len(image_urls)}, vids={len(video_urls)}"
-        )
-
-        return Post(
-            id=post_id,
-            title=title or post_id,
-            url=post_url,
-            text=text,
-            source="rednote",
-            image_urls=image_urls,
-            video_urls=video_urls,
-            extra={
-                "use_ytdlp": True,       # signal pipeline to use yt-dlp for download
-                "chrome_profile": self.user_data_dir,
-                "search_keyword": self.search_keyword,
-            },
-        )
-
-    # ── Public interface ──────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+    async def _collect_async(self, index_url: str, max_posts: int) -> list[dict]:
+        if self.mode == "favorites":
+            return await self._collect_favorites_async(index_url, max_posts)
+        return await self._collect_dom_async(index_url, max_posts)
 
     def get_posts(self, max_posts: int) -> Iterator[Post]:
         index_url = self._build_index_url()
-
         try:
-            index_page = self._fetch_with_scroll(index_url)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    post_infos = pool.submit(
+                        asyncio.run, self._collect_async(index_url, max_posts)
+                    ).result()
+            else:
+                post_infos = loop.run_until_complete(
+                    self._collect_async(index_url, max_posts)
+                )
         except Exception as exc:
-            print(f"[rednote] Index page load failed: {exc}")
+            print(f"[rednote] Collection failed: {exc}")
             return
 
-        post_links = self._collect_post_links(index_page, max_posts)
-
-        collected = 0
-        for post_url in post_links:
-            if collected >= max_posts:
+        print(f"[rednote] Collected {len(post_infos)} post links")
+        yielded = 0
+        for info in post_infos:
+            if yielded >= max_posts:
                 break
-            post = self._scrape_post(post_url)
-            if post is not None:
-                yield post
-                collected += 1
+            if self.video_only and info["type"] not in ("video", "unknown"):
+                continue
+            yield Post(
+                id=info["id"],
+                title=info["title"],
+                url=info["url"],
+                text="",
+                source="rednote",
+                image_urls=[],
+                video_urls=[],
+                extra={
+                    "use_xhs_downloader": True,
+                    "chrome_profile": self.user_data_dir,
+                    "note_type": info["type"],
+                },
+            )
+            yielded += 1
             time.sleep(self.request_delay)

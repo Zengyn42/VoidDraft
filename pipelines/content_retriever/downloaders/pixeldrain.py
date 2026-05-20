@@ -53,6 +53,22 @@ class PixeldrainDownloader(FileDownloader):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def list_album(self, list_id: str) -> list[dict]:
+        """
+        Return the file metadata list for a Pixeldrain album (/l/{list_id}).
+
+        Each dict contains: id, name, size (bytes), and other API fields.
+        Returns [] on error.
+        """
+        album_url = f"https://pixeldrain.com/api/list/{list_id}"
+        try:
+            resp = self._client.get(album_url)
+            resp.raise_for_status()
+            return resp.json().get("files", [])
+        except Exception as exc:
+            print(f"[pixeldrain] list_album({list_id}) failed: {exc}")
+            return []
+
     def _get_file_info(self, file_id: str) -> dict | None:
         """Return file metadata dict from the pixeldrain API, or None on error."""
         info_url = f"https://pixeldrain.com/api/file/{file_id}/info"

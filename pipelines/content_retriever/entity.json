@@ -1,32 +1,9 @@
 {
   "name": "content_retriever",
+  "description": "Rednote/Reddit content retrieval, transcription, and LLM summarisation pipeline.",
   "graph": {
     "state_schema": "content_retriever",
-    "nodes": [
-      {
-        "id": "fetch",
-        "type": "DETERMINISTIC"
-      },
-      {
-        "id": "download",
-        "type": "DETERMINISTIC"
-      },
-      {
-        "id": "analyze",
-        "type": "DETERMINISTIC"
-      },
-      {
-        "id": "report",
-        "type": "DETERMINISTIC"
-      }
-    ],
     "entry": "fetch",
-    "edges": [
-      {"from": "__start__", "to": "fetch"},
-      {"from": "fetch",     "to": "download"},
-      {"from": "download",  "to": "analyze"},
-      {"from": "analyze",   "to": "report"},
-      {"from": "report",    "to": "__end__"}
-    ]
+    "exit": "report"
   }
 }

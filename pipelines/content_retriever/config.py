@@ -1,6 +1,7 @@
 """PipelineConfig for content_retriever."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 
 @dataclass
 class PipelineConfig:
@@ -13,6 +14,11 @@ class PipelineConfig:
     frame_interval: int = 10
     max_frames: int = 8
     pixeldrain_api_key: str | None = None
+    summarize: bool = True                      # enable LLM summarisation node
+    summarize_backend: str = "none"             # "ollama" | "claude" | "none"
+    summarize_model: str = ""                   # model name for chosen backend
+    ollama_url: str = "http://localhost:11434"  # Ollama base URL
+    credentials_file: str = ""                  # rednote account credentials (EdenGateway)
 
     @classmethod
     def from_yaml(cls, path: str) -> "PipelineConfig":
@@ -30,6 +36,11 @@ class PipelineConfig:
             frame_interval=int(raw.get("frame_interval", 10)),
             max_frames=int(raw.get("max_frames", 8)),
             pixeldrain_api_key=raw.get("pixeldrain_api_key", None),
+            summarize=raw.get("summarize", True),
+            summarize_backend=raw.get("summarize_backend", "none"),
+            summarize_model=raw.get("summarize_model", ""),
+            ollama_url=raw.get("ollama_url", "http://localhost:11434"),
+            credentials_file=source_block.get("credentials_file", ""),
         )
 
     def to_dict(self) -> dict:
@@ -43,6 +54,11 @@ class PipelineConfig:
             "frame_interval": self.frame_interval,
             "max_frames": self.max_frames,
             "pixeldrain_api_key": self.pixeldrain_api_key,
+            "summarize": self.summarize,
+            "summarize_backend": self.summarize_backend,
+            "summarize_model": self.summarize_model,
+            "ollama_url": self.ollama_url,
+            "credentials_file": self.credentials_file,
         }
 
     @classmethod
@@ -57,5 +73,10 @@ class PipelineConfig:
             frame_interval=int(d.get("frame_interval", 10)),
             max_frames=int(d.get("max_frames", 8)),
             pixeldrain_api_key=d.get("pixeldrain_api_key"),
+            summarize=d.get("summarize", True),
+            summarize_backend=d.get("summarize_backend", "none"),
+            summarize_model=d.get("summarize_model", ""),
+            ollama_url=d.get("ollama_url", "http://localhost:11434"),
+            credentials_file=d.get("credentials_file", ""),
         )
 
