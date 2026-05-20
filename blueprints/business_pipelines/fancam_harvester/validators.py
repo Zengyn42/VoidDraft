@@ -23,9 +23,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, replace as dc_replace
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import Optional
 
@@ -67,7 +70,7 @@ class PostMeta:
 class DownloadRecord:
     post_id: str
     clip_id: str                # "{post_id}_{index}"
-    clip_type: str              # "source" | "clip"
+    clip_type: str              # "source" | "clip" | "merged" | "external_ref"
     url: str
     local_path: str             # absolute path
     file_size_bytes: int
@@ -75,7 +78,8 @@ class DownloadRecord:
     width: int
     height: int
     fps: float
-    download_method: str        # "yt-dlp" | "jdownloader" | "pixeldrain"
+    download_method: str        # "yt-dlp" | "jdownloader" | "pixeldrain" | "split"
+    pixeldrain_filename: str = ""  # original Pixeldrain filename (for album diff)
 
 
 @dataclass
@@ -84,8 +88,35 @@ class AlignRecord:
     source_clip_id: str        # which source download this aligns to
     offset_sec: float
     confidence: float
-    method: str                # "audio" | "visual" | "unmatched"
+    method: str                # "audio" | "dinov2" | "pose" | "unmatched"
+    # Per-layer raw confidence values (recorded for tuning regardless of winner)
+    audio_conf: float = 0.0
+    dinov2_conf: float = 0.0
+    pose_conf: float = 0.0
     error: str = ""
+
+
+@dataclass
+class SlowmoInfo:
+    clip_id: str
+    is_slowmo: bool
+    speed_factor: float        # 1.0 = normal, 2.0 = 2× slower
+    detected_by: str           # "fps_metadata"|"audio_bpm"|"flow_magnitude"|"none"
+
+
+@dataclass
+class FinalClipRecord:
+    clip_id: str
+    post_id: str
+    final_path: str            # main output file in final/
+    creative_path: str = ""    # creative-edit version (_slowmo / _zoom), if any
+    source_hd_path: str = ""   # source-extracted version (_original / _fullframe)
+    final_kept: str = ""       # "pixeldrain" | "source_hd" | "both"
+    is_slowmo: bool = False
+    speed_factor: float = 1.0
+    is_zoom_in: bool = False
+    zoom_factor: float = 1.0
+    zoom_method: str = ""
 
 
 @dataclass
