@@ -43,8 +43,24 @@ class FancamConfig:
         return Path(self.workspace) / "unidentified"
 
     @property
+    def final_dir(self) -> Path:
+        return Path(self.workspace) / "final"
+
+    @property
+    def hd_clips_dir(self) -> Path:
+        return Path(self.workspace) / "hd_clips"
+
+    @property
     def highlights_dir(self) -> Path:
         return Path(self.workspace) / "highlights"
+
+    @property
+    def logs_dir(self) -> Path:
+        return Path(self.workspace) / "logs"
+
+    @property
+    def db_path(self) -> Path:
+        return Path(self.workspace) / "fancam.db"
 
     # --- JDownloader ---
     jd_email: str = ""
@@ -81,6 +97,7 @@ class FancamConfig:
         for d in [
             self.raw_dir, self.source_dir, self.clips_dir,
             self.aligned_dir, self.library_dir, self.unidentified_dir,
-            self.highlights_dir,
+            self.highlights_dir, self.final_dir, self.hd_clips_dir,
+            self.logs_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)

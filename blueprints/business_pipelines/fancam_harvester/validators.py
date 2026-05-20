@@ -1,20 +1,22 @@
 """
-FancamHarvester pipeline node functions.
+FancamHarvester pipeline node functions — V1 implementation.
 
-Each function maps to one DETERMINISTIC node in entity.json.
-The `identify` node is CLAUDE_SDK (LLM), handled separately.
-
-Node functions:
-    fetch(state)     → posts: list[PostMeta]
-    download(state)  → downloads: list[DownloadRecord]
-    align(state)     → alignments: list[AlignRecord]
-    analyze(state)   → analyses: list[AnalysisRecord]
-    store(state)     → stored: list[StoredRecord]
+Node functions (in pipeline order):
+    fetch(state)                → posts: list[PostMeta]
+    download(state)             → downloads: list[DownloadRecord]
+    split_merged(state)         → downloads (extended with segments)
+    detect_slowmo_for_clips(st) → slowmo_info: dict
+    align(state)                → alignments: list[AlignRecord]   (parallel competition)
+    extract_hd(state)           → extracts: list[ExtractRecord]
+    select_best_clip(state)     → final_clips: list[FinalClipRecord]
+    parse_post_metadata(state)  → post_metas: list[PostMetadata]
+    store_results(state, db)    → _db_stats: dict
 
 Pulsify components reused:
-    JDownloaderHelper, VideoDownloader → download node
-    VideoClipper                       → quality re-extract
-    BaseAnalyzer (YOLO Pose)           → analyze node
+    url_downloader   → download node
+    slowmo_detect    → detect_slowmo_for_clips node
+    audio/dinov2/pose align → align node (parallel)
+    VideoClipper     → extract_hd / select_best_clip
 """
 
 from __future__ import annotations
@@ -48,7 +50,30 @@ _CONTENT_RETRIEVER = _VOIDDRAFT / "pipelines" / "content_retriever"
 if str(_CONTENT_RETRIEVER) not in sys.path:
     sys.path.insert(0, str(_CONTENT_RETRIEVER))
 
-from config import FancamConfig  # noqa: E402  (relative to pipeline dir)
+from config import FancamConfig  # noqa: E402
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tuning constants (DESIGN_V1.md §5)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# §5.1 — Alignment: parallel competition, minimum to accept
+ALIGN_MIN_ACCEPT       = 0.10   # below this → unmatched
+AUDIO_CONF_REF         = 0.10   # reference baseline (logged, not gating)
+DINOV2_CONF_REF        = 0.50
+POSE_CONF_REF          = 0.55
+
+# §5.2 — Slowmo detection
+SPEED_FACTOR_CANDIDATES = [1.0, 2.0, 4.0]
+
+# §5.3 — Zoom detection
+ZOOM_THRESHOLD         = 1.5
+AR_DIFF_THRESHOLD      = 0.15
+
+# §5.4 — Upvote settled threshold (hours)
+_SETTLED_HOURS         = 48.0
+
+# §5.5 — LLM metadata
+LLM_CONF_MIN           = 0.6
 
 # ---------------------------------------------------------------------------
 # Data records (all JSON-serialisable)
@@ -64,6 +89,7 @@ class PostMeta:
     pixeldrain_urls: list[str]
     text: str
     created_utc: float
+    score: int = 0
 
 
 @dataclass
@@ -79,7 +105,7 @@ class DownloadRecord:
     height: int
     fps: float
     download_method: str        # "yt-dlp" | "jdownloader" | "pixeldrain" | "split"
-    pixeldrain_filename: str = ""  # original Pixeldrain filename (for album diff)
+    pixeldrain_filename: str = ""  # original PD filename (for album diff)
 
 
 @dataclass
@@ -89,34 +115,11 @@ class AlignRecord:
     offset_sec: float
     confidence: float
     method: str                # "audio" | "dinov2" | "pose" | "unmatched"
-    # Per-layer raw confidence values (recorded for tuning regardless of winner)
+    error: str = ""
+    # parallel competition: all three layer confidences
     audio_conf: float = 0.0
     dinov2_conf: float = 0.0
     pose_conf: float = 0.0
-    error: str = ""
-
-
-@dataclass
-class SlowmoInfo:
-    clip_id: str
-    is_slowmo: bool
-    speed_factor: float        # 1.0 = normal, 2.0 = 2× slower
-    detected_by: str           # "fps_metadata"|"audio_bpm"|"flow_magnitude"|"none"
-
-
-@dataclass
-class FinalClipRecord:
-    clip_id: str
-    post_id: str
-    final_path: str            # main output file in final/
-    creative_path: str = ""    # creative-edit version (_slowmo / _zoom), if any
-    source_hd_path: str = ""   # source-extracted version (_original / _fullframe)
-    final_kept: str = ""       # "pixeldrain" | "source_hd" | "both"
-    is_slowmo: bool = False
-    speed_factor: float = 1.0
-    is_zoom_in: bool = False
-    zoom_factor: float = 1.0
-    zoom_method: str = ""
 
 
 @dataclass
@@ -133,6 +136,21 @@ class ExtractRecord:
     fps: float
     confidence: float          # alignment confidence
     method: str                # alignment method used
+
+
+@dataclass
+class FinalClipRecord:
+    """Result of select_best_clip: which files go into final/."""
+    clip_id: str
+    post_id: str
+    final_path: str            # main final file
+    final_creative_path: str = ""  # creative edit variant path (if any)
+    final_kept: str = ""       # "pixeldrain" | "source_hd" | "both"
+    is_slowmo: bool = False
+    speed_factor: float = 1.0
+    is_zoom_in: bool = False
+    zoom_factor: float = 1.0
+    zoom_method: str = ""
 
 
 @dataclass
@@ -180,8 +198,38 @@ def _load_config(state: dict) -> FancamConfig:
 
 def _video_info(path: Path) -> dict:
     """Delegate to pulsify.utils.video_info."""
-    from pulsify.utils.video_info import get_video_info
-    return get_video_info(path)
+    try:
+        from pulsify.utils.video_info import get_video_info
+        return get_video_info(path)
+    except ImportError:
+        logger.warning("pulsify.utils.video_info not available — using ffprobe")
+        return _ffprobe_info(path)
+
+
+def _ffprobe_info(path: Path) -> dict:
+    """Fallback video info via raw ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-show_format", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video":
+                fps_str = s.get("r_frame_rate", "0/1")
+                num, den = fps_str.split("/")
+                fps = float(num) / float(den) if float(den) else 0.0
+                dur = float(data.get("format", {}).get("duration", 0))
+                return {
+                    "width": int(s.get("width", 0)),
+                    "height": int(s.get("height", 0)),
+                    "fps": fps,
+                    "duration_sec": dur,
+                }
+    except Exception as e:
+        logger.warning("ffprobe failed for %s: %s", path, e)
+    return {"width": 0, "height": 0, "fps": 0.0, "duration_sec": 0.0}
 
 
 def _extract_pixeldrain_links(text: str) -> list[str]:
@@ -248,6 +296,7 @@ def fetch(state: dict) -> dict:
                 pixeldrain_urls=_extract_pixeldrain_links(full_text),
                 text=post.text[:1000],
                 created_utc=float(post.extra.get("created_utc", 0)),
+                score=int(post.extra.get("score", 0)),
             )
             posts.append(pm)
             logger.info(
@@ -275,10 +324,22 @@ def download(state: dict) -> dict:
     errors: list[str] = json.loads(state.get("errors", "[]"))
     records: list[DownloadRecord] = []
 
-    from pulsify.fetcher.url_downloader import download_urls, DownloadResult
-    from downloaders.pixeldrain import PixeldrainDownloader
+    try:
+        from pulsify.fetcher.url_downloader import download_urls
+    except ImportError:
+        errors.append("download: pulsify.fetcher.url_downloader not available")
+        return {"downloads": "[]", "errors": json.dumps(errors)}
 
-    pd = PixeldrainDownloader(api_key=cfg.pixeldrain_api_key or None)
+    try:
+        from downloaders.pixeldrain import PixeldrainDownloader
+        pd = PixeldrainDownloader(api_key=cfg.pixeldrain_api_key or None)
+    except ImportError:
+        pd = None
+        errors.append("download: pixeldrain downloader not available")
+
+    from clip_analyzer import (
+        parse_clip_filename, PixeldrainFile, identify_source_in_album,
+    )
 
     for post_data in posts:
         post_id = post_data["post_id"]
@@ -287,56 +348,57 @@ def download(state: dict) -> dict:
         src_urls = post_data.get("source_urls", [])
         if src_urls:
             dest_dir = cfg.source_dir / post_id
-            results = download_urls(
-                urls=src_urls,
-                dest_dir=dest_dir,
-                max_duration_sec=300.0,  # skip videos > 5 min
-            )
-            for idx, r in enumerate(results):
-                clip_id = f"{post_id}_src{idx}"
-                if r.skipped:
-                    errors.append(f"source {clip_id} skipped: {r.skip_reason}")
-                elif not r.success:
-                    errors.append(f"source {clip_id} failed: {r.error}")
-                else:
-                    records.append(DownloadRecord(
-                        post_id=post_id,
-                        clip_id=clip_id,
-                        clip_type="source",
-                        url=r.url,
-                        local_path=str(r.local_path),
-                        file_size_bytes=r.file_size_bytes,
-                        duration_sec=r.duration_sec,
-                        width=r.width,
-                        height=r.height,
-                        fps=r.fps,
-                        download_method="yt-dlp",
-                    ))
+            try:
+                results = download_urls(
+                    urls=src_urls,
+                    dest_dir=dest_dir,
+                    max_duration_sec=300.0,  # skip videos > 5 min
+                )
+                for idx, r in enumerate(results):
+                    clip_id = f"{post_id}_src{idx}"
+                    if r.skipped:
+                        errors.append(f"source {clip_id} skipped: {r.skip_reason}")
+                    elif not r.success:
+                        errors.append(f"source {clip_id} failed: {r.error}")
+                    else:
+                        records.append(DownloadRecord(
+                            post_id=post_id,
+                            clip_id=clip_id,
+                            clip_type="source",
+                            url=r.url,
+                            local_path=str(r.local_path),
+                            file_size_bytes=r.file_size_bytes,
+                            duration_sec=r.duration_sec,
+                            width=r.width,
+                            height=r.height,
+                            fps=r.fps,
+                            download_method="yt-dlp",
+                        ))
+            except Exception as e:
+                errors.append(f"source download {post_id}: {e}")
 
         # --- Download pixeldrain clips (with source/merged classification) ---
-        import re as _re
-        from clip_analyzer import (
-            parse_clip_filename, PixeldrainFile, identify_source_in_album,
-            fill_probe_info,
-        )
-
-        source_platform = post_data.get("platform", "")
+        if pd is None:
+            continue
 
         for pd_url in post_data.get("pixeldrain_urls", []):
             dest_dir = cfg.clips_dir / post_id
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             # Pre-fetch album metadata to classify files before downloading.
-            # ALWAYS run even when we already have an external source — Pixeldrain
-            # native source takes priority if it has higher resolution.
-            list_match = _re.search(r"pixeldrain\.com/l/([A-Za-z0-9_-]+)", pd_url)
+            list_match = re.search(r"pixeldrain\.com/l/([A-Za-z0-9_-]+)", pd_url)
             album_files_raw: list[dict] = []
             source_file_id: str | None = None
-            album_youtube_ids: list[str] = []  # IDs from filenames like [youtube@ID]
+            album_youtube_ids: list[str] = []
 
             if list_match:
                 list_id = list_match.group(1)
-                album_files_raw = pd.list_album(list_id)
+                try:
+                    album_files_raw = pd.list_album(list_id)
+                except Exception as e:
+                    errors.append(f"pixeldrain list_album {list_id}: {e}")
+                    continue
+
                 pd_files = [
                     PixeldrainFile(
                         file_id=f["id"],
@@ -347,7 +409,7 @@ def download(state: dict) -> dict:
                 ]
 
                 # Priority 1: Pixeldrain native source candidate
-                source_result = identify_source_in_album(pd_files, source_platform)
+                source_result = identify_source_in_album(pd_files)
                 if source_result.file:
                     source_file_id = source_result.file.file_id
                     logger.info(
@@ -363,9 +425,7 @@ def download(state: dict) -> dict:
                         if yt_id not in album_youtube_ids:
                             album_youtube_ids.append(yt_id)
 
-            # If Pixeldrain has no native source, try [youtube@ID] fallback.
-            # These are added to source_urls only when the post didn't already
-            # provide them (dedup handled by _extract_source_links).
+            # If Pixeldrain has no native source, try [youtube@ID] fallback
             if not source_file_id and album_youtube_ids:
                 existing_yt_urls = set(post_data.get("source_urls", []))
                 yt_fallback_urls = [
@@ -379,31 +439,34 @@ def download(state: dict) -> dict:
                         post_id, len(yt_fallback_urls),
                     )
                     yt_dest = cfg.source_dir / post_id
-                    yt_results = download_urls(
-                        urls=yt_fallback_urls,
-                        dest_dir=yt_dest,
-                        max_duration_sec=300.0,
-                    )
-                    for idx, r in enumerate(yt_results):
-                        cid = f"{post_id}_ytsrc{idx}"
-                        if r.skipped:
-                            errors.append(f"yt-src {cid} skipped: {r.skip_reason}")
-                        elif not r.success:
-                            errors.append(f"yt-src {cid} failed: {r.error}")
-                        else:
-                            records.append(DownloadRecord(
-                                post_id=post_id,
-                                clip_id=cid,
-                                clip_type="source",
-                                url=r.url,
-                                local_path=str(r.local_path),
-                                file_size_bytes=r.file_size_bytes,
-                                duration_sec=r.duration_sec,
-                                width=r.width,
-                                height=r.height,
-                                fps=r.fps,
-                                download_method="yt-dlp",
-                            ))
+                    try:
+                        yt_results = download_urls(
+                            urls=yt_fallback_urls,
+                            dest_dir=yt_dest,
+                            max_duration_sec=300.0,
+                        )
+                        for idx, r in enumerate(yt_results):
+                            cid = f"{post_id}_ytsrc{idx}"
+                            if r.skipped:
+                                errors.append(f"yt-src {cid} skipped: {r.skip_reason}")
+                            elif not r.success:
+                                errors.append(f"yt-src {cid} failed: {r.error}")
+                            else:
+                                records.append(DownloadRecord(
+                                    post_id=post_id,
+                                    clip_id=cid,
+                                    clip_type="source",
+                                    url=r.url,
+                                    local_path=str(r.local_path),
+                                    file_size_bytes=r.file_size_bytes,
+                                    duration_sec=r.duration_sec,
+                                    width=r.width,
+                                    height=r.height,
+                                    fps=r.fps,
+                                    download_method="yt-dlp",
+                                ))
+                    except Exception as e:
+                        errors.append(f"yt-src download {post_id}: {e}")
 
             try:
                 downloaded = pd.download(pd_url, dest_dir)
@@ -419,8 +482,7 @@ def download(state: dict) -> dict:
                 # Classify clip_type
                 if source_file_id and file_id_in_album == source_file_id:
                     c_type = "source"
-                    # Priority check: Pixeldrain source wins if higher resolution.
-                    # Demote any previously recorded external sources that are lower-res.
+                    # Priority check: Pixeldrain source wins if higher resolution
                     pd_pixels = info.get("width", 0) * info.get("height", 0)
                     for i, r in enumerate(records):
                         if r.post_id != post_id or r.clip_type != "source":
@@ -428,8 +490,8 @@ def download(state: dict) -> dict:
                         ext_pixels = r.width * r.height
                         if pd_pixels >= ext_pixels:
                             logger.info(
-                                "Pixeldrain source (%dx%d) ≥ external source (%dx%d) "
-                                "— demoting external source '%s' to clip",
+                                "Pixeldrain source (%dx%d) >= external source (%dx%d) "
+                                "— demoting external source '%s' to external_ref",
                                 info.get("width", 0), info.get("height", 0),
                                 r.width, r.height, r.clip_id,
                             )
@@ -455,11 +517,12 @@ def download(state: dict) -> dict:
                          if file_id_in_album else pd_url),
                     local_path=str(path),
                     file_size_bytes=path.stat().st_size,
-                    duration_sec=info["duration_sec"],
-                    width=info["width"],
-                    height=info["height"],
-                    fps=info["fps"],
+                    duration_sec=info.get("duration_sec", 0.0),
+                    width=info.get("width", 0),
+                    height=info.get("height", 0),
+                    fps=info.get("fps", 0.0),
                     download_method="pixeldrain",
+                    pixeldrain_filename=path.name,
                 ))
 
     return {
@@ -477,17 +540,19 @@ def split_merged(state: dict) -> dict:
     For each 'merged' clip: detect scene cuts, split into segments, and
     add the segments back into the downloads list as 'clip' type.
 
-    Individual clips already present (same post) are used for cut verification
-    to filter false positives.
-
-    The original merged record stays in downloads (clip_type="merged") so it
-    can still be used as reference. New segment records get clip_type="clip".
+    If individual clips already exist for the same post, skip splitting.
+    If no cuts detected, the merged file is treated as a single clip.
     """
     cfg = _load_config(state)
     downloads: list[dict] = json.loads(state.get("downloads", "[]"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
 
-    from pulsify.align.scene_cut import detect_cuts, verify_cuts, flag_duplicate_matches
+    try:
+        from pulsify.align.scene_cut import detect_cuts, verify_cuts, flag_duplicate_matches
+        _scene_cut_available = True
+    except ImportError:
+        _scene_cut_available = False
+        logger.warning("pulsify.align.scene_cut not available — merged clips won't be split")
 
     new_records: list[dict] = []
 
@@ -512,8 +577,6 @@ def split_merged(state: dict) -> dict:
         ]
 
         # ── Optimization: if individual clips already exist, skip splitting ──
-        # The Pixeldrain album already contains the individual segments.
-        # Splitting the merged file would produce duplicates and wasted I/O.
         if individual_clips:
             logger.info(
                 "split_merged: post=%s already has %d individual clip(s) — "
@@ -522,15 +585,37 @@ def split_merged(state: dict) -> dict:
             )
             continue
 
+        if not _scene_cut_available:
+            # Treat whole merged file as one clip
+            rec_copy = dict(rec)
+            rec_copy["clip_type"] = "clip"
+            rec_copy["clip_id"] = f"{rec['clip_id']}_whole"
+            new_records.append(rec_copy)
+            logger.info(
+                "split_merged: scene_cut unavailable — treating %s as single clip",
+                merged_path.name,
+            )
+            continue
+
         # Detect cuts
         try:
             cut_timestamps = detect_cuts(merged_path, threshold=25.0, min_gap_sec=1.0)
         except Exception as e:
             errors.append(f"split_merged detect_cuts {merged_path.name}: {e}")
+            # Treat as single clip on detection failure
+            rec_copy = dict(rec)
+            rec_copy["clip_type"] = "clip"
+            rec_copy["clip_id"] = f"{rec['clip_id']}_whole"
+            new_records.append(rec_copy)
             continue
 
         if not cut_timestamps:
+            # No cuts → treat as single clip (DESIGN_V1.md §3.3)
             logger.info("split_merged: no cuts found in %s — treating as single clip", merged_path.name)
+            rec_copy = dict(rec)
+            rec_copy["clip_type"] = "clip"
+            rec_copy["clip_id"] = f"{rec['clip_id']}_whole"
+            new_records.append(rec_copy)
             continue
 
         logger.info(
@@ -540,33 +625,13 @@ def split_merged(state: dict) -> dict:
             [f"{t:.2f}s" for t in cut_timestamps],
         )
 
-        # Verify cuts against individual clips (filter false positives)
-        verified_cuts = cut_timestamps
-        if individual_clips:
-            try:
-                verifications = verify_cuts(merged_path, individual_clips, cut_timestamps)
-                verifications = flag_duplicate_matches(verifications)
-                # Keep only verified cuts
-                verified_cuts = [
-                    v.cut_timestamp for v in verifications if v.verified
-                ]
-                false_cuts = [v for v in verifications if not v.verified]
-                if false_cuts:
-                    logger.info(
-                        "split_merged: removed %d false cut(s): %s",
-                        len(false_cuts),
-                        [f"{v.cut_timestamp:.2f}s" for v in false_cuts],
-                    )
-            except Exception as e:
-                logger.warning("split_merged: verify_cuts failed (%s) — using raw cuts", e)
-
-        # Split the merged file at verified cut points
+        # Split the merged file at cut points
         seg_dir = Path(rec["local_path"]).parent / f"_segments_{merged_path.stem}"
         seg_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             from pulsify.align.scene_cut import split_at_cuts
-            seg_paths = split_at_cuts(merged_path, verified_cuts, seg_dir)
+            seg_paths = split_at_cuts(merged_path, cut_timestamps, seg_dir)
         except Exception as e:
             errors.append(f"split_merged split_at_cuts {merged_path.name}: {e}")
             continue
@@ -580,15 +645,16 @@ def split_merged(state: dict) -> dict:
                 "url": rec["url"],
                 "local_path": str(seg_path),
                 "file_size_bytes": seg_path.stat().st_size,
-                "duration_sec": info["duration_sec"],
-                "width": info["width"],
-                "height": info["height"],
-                "fps": info["fps"],
+                "duration_sec": info.get("duration_sec", 0.0),
+                "width": info.get("width", 0),
+                "height": info.get("height", 0),
+                "fps": info.get("fps", 0.0),
                 "download_method": "split",
+                "pixeldrain_filename": rec.get("pixeldrain_filename", ""),
             })
             logger.info(
                 "split_merged: segment %d → %s (%.2fs)",
-                i, seg_path.name, info["duration_sec"],
+                i, seg_path.name, info.get("duration_sec", 0.0),
             )
 
     # Append new segment records to downloads
@@ -603,34 +669,137 @@ def split_merged(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: align
+# Node: detect_slowmo_for_clips
 # ---------------------------------------------------------------------------
 
-# Minimum pose confidence to trust motion_find_offset result
-_POSE_CONF_THRESHOLD  = 0.55
-# Minimum audio confidence to trust audio cross-correlation result
-_AUDIO_CONF_THRESHOLD = 0.10
-
-def align(state: dict) -> dict:
+def detect_slowmo_for_clips(state: dict) -> dict:
     """
-    Align each fancam clip to its source video.
+    Run slowmo detection on all clip-type downloads.
 
-    Strategy (per clip, in order):
-      1. Audio cross-correlation  — ms-level accuracy, camera-angle independent
-      2. DINOv2 diagonal match    — semantic frame embeddings, robust to different
-                                    camera angles, no audio needed  (fallback)
-      3. Pose motion alignment    — Pulsify motion_find_offset  (last resort)
+    Outputs state["slowmo_info"] = {clip_id: {is_slowmo, speed_factor, detected_by}}
     """
     downloads: list[dict] = json.loads(state.get("downloads", "[]"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
-    alignments: list[AlignRecord] = []
+    slowmo_info: dict[str, dict] = {}
 
-    from pulsify.align import audio_find_offset, dinov2_find_offset
     try:
-        from pulsify.align import motion_find_offset, MotionAlignError
-        _pose_available = True
+        from pulsify.align.slowmo_detect import detect_slowmo
+        _slowmo_available = True
     except ImportError:
-        _pose_available = False
+        _slowmo_available = False
+        logger.warning("pulsify.align.slowmo_detect not available — skipping slowmo detection")
+
+    for rec in downloads:
+        if rec["clip_type"] != "clip":
+            continue
+
+        clip_id = rec["clip_id"]
+        clip_path = Path(rec["local_path"])
+
+        if not clip_path.exists():
+            slowmo_info[clip_id] = {"is_slowmo": False, "speed_factor": 1.0, "detected_by": "none"}
+            continue
+
+        if not _slowmo_available:
+            slowmo_info[clip_id] = {"is_slowmo": False, "speed_factor": 1.0, "detected_by": "unavailable"}
+            continue
+
+        try:
+            result = detect_slowmo(clip_path)
+            slowmo_info[clip_id] = {
+                "is_slowmo": result.is_slowmo,
+                "speed_factor": result.speed_factor,
+                "detected_by": result.detected_by,
+            }
+            if result.is_slowmo:
+                logger.info(
+                    "detect_slowmo: %s → slowmo (factor=%.1f, by=%s)",
+                    clip_id, result.speed_factor, result.detected_by,
+                )
+        except Exception as e:
+            logger.warning("detect_slowmo failed for %s: %s", clip_id, e)
+            slowmo_info[clip_id] = {"is_slowmo": False, "speed_factor": 1.0, "detected_by": "error"}
+            errors.append(f"detect_slowmo {clip_id}: {e}")
+
+    return {
+        "slowmo_info": json.dumps(slowmo_info),
+        "errors": json.dumps(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: align (parallel competition — DESIGN_V1.md §3.5)
+# ---------------------------------------------------------------------------
+
+def _run_audio_align(source_path: Path, clip_path: Path, speed_factor: float) -> tuple[float, float]:
+    """Run audio chroma alignment. Returns (offset_sec, confidence)."""
+    try:
+        from align.audio_fingerprint import find_offset as audio_find_offset
+        if speed_factor != 1.0:
+            result = audio_find_offset(
+                source_path, clip_path,
+                clip_speed_factor=speed_factor,
+                min_confidence=0.0,  # don't raise, just return low conf
+            )
+        else:
+            result = audio_find_offset(
+                source_path, clip_path,
+                min_confidence=0.0,
+            )
+        return (result.offset_sec, result.confidence)
+    except Exception as e:
+        logger.debug("audio align failed: %s", e)
+        return (0.0, 0.0)
+
+
+def _run_dinov2_align(source_path: Path, clip_path: Path) -> tuple[float, float]:
+    """Run DINOv2 diagonal alignment. Returns (offset_sec, confidence)."""
+    try:
+        from pulsify.align.dinov2_align import dinov2_find_offset
+        offset, conf = dinov2_find_offset(source_path, clip_path)
+        return (offset, conf)
+    except ImportError:
+        logger.debug("DINOv2 align not available")
+        return (0.0, 0.0)
+    except Exception as e:
+        logger.debug("DINOv2 align failed: %s", e)
+        return (0.0, 0.0)
+
+
+def _run_pose_align(source_path: Path, clip_path: Path) -> tuple[float, float]:
+    """Run YOLO pose motion alignment. Returns (offset_sec, confidence)."""
+    try:
+        from pulsify.align.motion_align import find_offset as motion_find_offset
+        result = motion_find_offset(
+            source_video=source_path,
+            clip_video=clip_path,
+            device="cpu",
+        )
+        return (result.offset_sec, result.confidence)
+    except ImportError:
+        logger.debug("Pose align not available")
+        return (0.0, 0.0)
+    except Exception as e:
+        logger.debug("Pose align failed: %s", e)
+        return (0.0, 0.0)
+
+
+def align(state: dict) -> dict:
+    """
+    Align each fancam clip to its source video using parallel competition.
+
+    All three methods run concurrently:
+      1. Audio chroma alignment (with slowmo speed compensation)
+      2. DINOv2 diagonal match
+      3. YOLO pose motion
+
+    The result with the highest confidence wins.
+    All three confidences are recorded for tuning analysis.
+    """
+    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
+    slowmo_info: dict = json.loads(state.get("slowmo_info", "{}"))
+    errors: list[str] = json.loads(state.get("errors", "[]"))
+    alignments: list[AlignRecord] = []
 
     # Build lookup: post_id → source records and clip records
     sources_by_post: dict[str, list[dict]] = {}
@@ -655,7 +824,8 @@ def align(state: dict) -> dict:
                 ))
             continue
 
-        best_source = max(source_recs, key=lambda r: r["file_size_bytes"])
+        # Pick best source by pixel count (not file size)
+        best_source = max(source_recs, key=lambda r: r["width"] * r["height"])
 
         for cr in clip_recs:
             clip_path   = Path(cr["local_path"])
@@ -670,77 +840,81 @@ def align(state: dict) -> dict:
                 ))
                 continue
 
-            # ── Strategy 1: audio cross-correlation ──────────────────────
-            audio_offset, audio_conf = audio_find_offset(source_path, clip_path)
+            # Get speed factor for this clip
+            clip_slowmo = slowmo_info.get(cr["clip_id"], {})
+            speed_factor = clip_slowmo.get("speed_factor", 1.0)
 
-            if audio_offset >= 0 and audio_conf >= _AUDIO_CONF_THRESHOLD:
-                alignments.append(AlignRecord(
-                    clip_id=cr["clip_id"],
-                    source_clip_id=best_source["clip_id"],
-                    offset_sec=audio_offset,
-                    confidence=min(1.0, audio_conf * 5),  # scale to [0,1] range
-                    method="audio",
-                ))
-                logger.info(
-                    "Aligned %s via audio: offset=%.3fs  raw_conf=%.3f",
-                    cr["clip_id"], audio_offset, audio_conf,
+            # ── Parallel competition: run all three methods concurrently ──
+            audio_result = (0.0, 0.0)
+            dinov2_result = (0.0, 0.0)
+            pose_result = (0.0, 0.0)
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                future_audio = executor.submit(
+                    _run_audio_align, source_path, clip_path, speed_factor,
                 )
-                continue
-
-            # ── Strategy 2: DINOv2 diagonal alignment (no-audio fallback) ──
-            dino_offset, dino_conf = dinov2_find_offset(source_path, clip_path)
-            _DINO_CONF_THRESHOLD = 0.50
-
-            if dino_offset >= 0 and dino_conf >= _DINO_CONF_THRESHOLD:
-                alignments.append(AlignRecord(
-                    clip_id=cr["clip_id"],
-                    source_clip_id=best_source["clip_id"],
-                    offset_sec=dino_offset,
-                    confidence=dino_conf,
-                    method="dinov2",
-                ))
-                logger.info(
-                    "Aligned %s via DINOv2: offset=%.3fs  conf=%.3f",
-                    cr["clip_id"], dino_offset, dino_conf,
+                future_dinov2 = executor.submit(
+                    _run_dinov2_align, source_path, clip_path,
                 )
-                continue
-
-            # ── Strategy 3: pose motion alignment (last resort) ──────────
-            if not _pose_available:
-                alignments.append(AlignRecord(
-                    clip_id=cr["clip_id"],
-                    source_clip_id=best_source["clip_id"],
-                    offset_sec=0.0, confidence=0.0,
-                    method="unmatched",
-                    error=f"audio conf={audio_conf:.3f}, dino conf={dino_conf:.3f}, pose unavailable",
-                ))
-                continue
-
-            try:
-                result = motion_find_offset(
-                    source_video=source_path,
-                    clip_video=clip_path,
-                    device="cpu",
+                future_pose = executor.submit(
+                    _run_pose_align, source_path, clip_path,
                 )
-                alignments.append(AlignRecord(
-                    clip_id=cr["clip_id"],
-                    source_clip_id=best_source["clip_id"],
-                    offset_sec=result.offset_sec,
-                    confidence=result.confidence,
-                    method=result.method,
-                ))
-                logger.info(
-                    "Aligned %s via pose: offset=%.2fs conf=%.2f",
-                    cr["clip_id"], result.offset_sec, result.confidence,
+
+                try:
+                    audio_result = future_audio.result(timeout=120)
+                except Exception as e:
+                    logger.debug("audio future error: %s", e)
+
+                try:
+                    dinov2_result = future_dinov2.result(timeout=120)
+                except Exception as e:
+                    logger.debug("dinov2 future error: %s", e)
+
+                try:
+                    pose_result = future_pose.result(timeout=120)
+                except Exception as e:
+                    logger.debug("pose future error: %s", e)
+
+            # ── Select winner: highest confidence ──
+            candidates = [
+                ("audio",  audio_result[0],  audio_result[1]),
+                ("dinov2", dinov2_result[0], dinov2_result[1]),
+                ("pose",   pose_result[0],   pose_result[1]),
+            ]
+            # Sort by confidence descending
+            candidates.sort(key=lambda x: x[2], reverse=True)
+            best_method, best_offset, best_conf = candidates[0]
+
+            if best_conf < ALIGN_MIN_ACCEPT:
+                best_method = "unmatched"
+                best_offset = 0.0
+                error_msg = (
+                    f"all methods below threshold: "
+                    f"audio={audio_result[1]:.3f} "
+                    f"dinov2={dinov2_result[1]:.3f} "
+                    f"pose={pose_result[1]:.3f}"
                 )
-            except MotionAlignError as e:
-                logger.warning("Pose alignment failed for %s: %s", cr["clip_id"], e)
-                alignments.append(AlignRecord(
-                    clip_id=cr["clip_id"],
-                    source_clip_id=best_source["clip_id"],
-                    offset_sec=0.0, confidence=0.0,
-                    method="unmatched", error=str(e),
-                ))
+            else:
+                error_msg = ""
+
+            alignments.append(AlignRecord(
+                clip_id=cr["clip_id"],
+                source_clip_id=best_source["clip_id"],
+                offset_sec=best_offset,
+                confidence=best_conf,
+                method=best_method,
+                error=error_msg,
+                audio_conf=audio_result[1],
+                dinov2_conf=dinov2_result[1],
+                pose_conf=pose_result[1],
+            ))
+
+            logger.info(
+                "Aligned %s: method=%s offset=%.2fs conf=%.3f "
+                "[audio=%.3f dinov2=%.3f pose=%.3f]",
+                cr["clip_id"], best_method, best_offset, best_conf,
+                audio_result[1], dinov2_result[1], pose_result[1],
+            )
 
     return {
         "alignments": json.dumps([asdict(a) for a in alignments]),
@@ -749,32 +923,19 @@ def align(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: extract_hd   (step 4 + 5)
+# Node: extract_hd   (cut HD segment from source at aligned offset)
 # ---------------------------------------------------------------------------
 
 def extract_hd(state: dict) -> dict:
     """
     For every successfully aligned clip, cut the corresponding segment from
-    the source video (which is usually higher resolution) and save it as a
-    backup HD clip.
-
-    Each ExtractRecord stores:
-      - start_in_source / end_in_source  (timestamps in the source file)
-      - local_path of the extracted file
-      - alignment confidence + method
+    the source video and save it as an HD clip.
     """
     cfg = _load_config(state)
     downloads: list[dict] = json.loads(state.get("downloads", "[]"))
     alignments: list[dict] = json.loads(state.get("alignments", "[]"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
     extracts: list[ExtractRecord] = []
-
-    try:
-        from pulsify.video_clipper import VideoClipper
-        clipper = VideoClipper()
-    except ImportError as e:
-        errors.append(f"extract_hd: VideoClipper unavailable: {e}")
-        return {"extracts": "[]", "errors": json.dumps(errors)}
 
     downloads_by_id = {d["clip_id"]: d for d in downloads}
     align_by_clip = {a["clip_id"]: a for a in alignments}
@@ -784,8 +945,6 @@ def extract_hd(state: dict) -> dict:
 
     for clip_id, align_rec in align_by_clip.items():
         if align_rec["method"] == "unmatched":
-            continue
-        if align_rec["confidence"] < 0.40:
             continue
 
         clip_dl = downloads_by_id.get(clip_id)
@@ -802,19 +961,30 @@ def extract_hd(state: dict) -> dict:
             continue
 
         out_path = hd_dir / f"{clip_id}_hd.mp4"
+
+        # Use FFmpeg stream copy for speed (no re-encoding)
         try:
-            success = clipper.extract_clip(
-                input_file=str(src_path),
-                start_time=offset,
-                duration=duration,
-                output_file=str(out_path),
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(max(0, offset)),
+                    "-i", str(src_path),
+                    "-t", str(duration),
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    str(out_path),
+                ],
+                capture_output=True, text=True, timeout=120,
             )
+            if result.returncode != 0:
+                errors.append(f"extract_hd ffmpeg {clip_id}: {result.stderr[:200]}")
+                continue
         except Exception as e:
             errors.append(f"extract_hd {clip_id}: {e}")
             continue
 
-        if not success or not out_path.exists():
-            errors.append(f"extract_hd {clip_id}: extraction returned no file")
+        if not out_path.exists() or out_path.stat().st_size < 1024:
+            errors.append(f"extract_hd {clip_id}: output missing or too small")
             continue
 
         info = _video_info(out_path)
@@ -845,7 +1015,192 @@ def extract_hd(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: parse_post_metadata   (step 6)
+# Node: select_best_clip  (DESIGN_V1.md §3.7 — creative edit + quality)
+# ---------------------------------------------------------------------------
+
+def select_best_clip(state: dict) -> dict:
+    """
+    For each clip, decide which files go into final/:
+      - Creative edit (slowmo/zoom) → keep both versions
+      - No creative edit → keep higher quality version
+      - Same pixels, different fps → keep both
+    """
+    cfg = _load_config(state)
+    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
+    alignments: list[dict] = json.loads(state.get("alignments", "[]"))
+    extracts: list[dict] = json.loads(state.get("extracts", "[]"))
+    slowmo_info: dict = json.loads(state.get("slowmo_info", "{}"))
+    errors: list[str] = json.loads(state.get("errors", "[]"))
+    final_clips: list[FinalClipRecord] = []
+
+    from clip_analyzer import zoom_detect
+
+    downloads_by_id = {d["clip_id"]: d for d in downloads}
+    align_by_clip = {a["clip_id"]: a for a in alignments}
+    extract_by_clip = {e["clip_id"]: e for e in extracts}
+
+    final_dir = Path(cfg.workspace) / "final"
+
+    clips = [d for d in downloads if d["clip_type"] == "clip"]
+
+    for cr in clips:
+        clip_id = cr["clip_id"]
+        post_id = cr["post_id"]
+        clip_path = Path(cr["local_path"])
+
+        if not clip_path.exists():
+            continue
+
+        post_final_dir = final_dir / post_id
+        post_final_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get slowmo info
+        clip_slowmo = slowmo_info.get(clip_id, {})
+        is_slowmo = clip_slowmo.get("is_slowmo", False)
+        speed_factor = clip_slowmo.get("speed_factor", 1.0)
+
+        # Get alignment info
+        align_rec = align_by_clip.get(clip_id)
+        hd_extract = extract_by_clip.get(clip_id)
+
+        # Get source download for zoom detection
+        source_dl = None
+        if align_rec and align_rec.get("source_clip_id"):
+            source_dl = downloads_by_id.get(align_rec["source_clip_id"])
+
+        source_path = Path(source_dl["local_path"]) if source_dl else None
+        align_offset = align_rec["offset_sec"] if align_rec else 0.0
+
+        # ── Zoom detection ──
+        is_zoom_in = False
+        zoom_factor = 1.0
+        zoom_method = "no_source"
+
+        if source_path and source_path.exists() and align_rec and align_rec["method"] != "unmatched":
+            try:
+                zr = zoom_detect(
+                    clip_path, source_path,
+                    align_offset_sec=align_offset,
+                    zoom_threshold=ZOOM_THRESHOLD,
+                )
+                is_zoom_in = zr.is_zoom_in
+                zoom_factor = zr.zoom_factor
+                zoom_method = zr.method
+            except Exception as e:
+                logger.warning("zoom_detect failed for %s: %s", clip_id, e)
+                errors.append(f"zoom_detect {clip_id}: {e}")
+
+        # ── Creative edit judgment (§3.7) ──
+        has_creative_edit = is_slowmo or is_zoom_in
+
+        if has_creative_edit:
+            # Keep BOTH: pixeldrain clip (creative) + source extract (original)
+            if is_slowmo:
+                creative_dst = post_final_dir / f"{clip_id}_slowmo.mp4"
+                original_dst = post_final_dir / f"{clip_id}_original.mp4"
+            else:  # zoom
+                creative_dst = post_final_dir / f"{clip_id}_zoom.mp4"
+                original_dst = post_final_dir / f"{clip_id}_fullframe.mp4"
+
+            # Copy creative edit (pixeldrain clip)
+            shutil.copy2(str(clip_path), str(creative_dst))
+
+            # Copy original from source (HD extract if available)
+            if hd_extract and Path(hd_extract["local_path"]).exists():
+                shutil.copy2(hd_extract["local_path"], str(original_dst))
+                final_kept = "both"
+            else:
+                # No HD extract available — only keep creative version
+                original_dst = ""
+                final_kept = "pixeldrain"
+
+            final_clips.append(FinalClipRecord(
+                clip_id=clip_id,
+                post_id=post_id,
+                final_path=str(creative_dst),
+                final_creative_path=str(original_dst) if original_dst else "",
+                final_kept=final_kept,
+                is_slowmo=is_slowmo,
+                speed_factor=speed_factor,
+                is_zoom_in=is_zoom_in,
+                zoom_factor=zoom_factor,
+                zoom_method=zoom_method,
+            ))
+            logger.info(
+                "select_best: %s → creative edit (%s), kept=%s",
+                clip_id, "slowmo" if is_slowmo else "zoom", final_kept,
+            )
+
+        else:
+            # No creative edit — compare quality: pixels then fps
+            clip_pixels = cr["width"] * cr["height"]
+            clip_fps = cr["fps"]
+
+            hd_pixels = 0
+            hd_fps = 0.0
+            hd_path = None
+            if hd_extract and Path(hd_extract["local_path"]).exists():
+                hd_pixels = hd_extract["width"] * hd_extract["height"]
+                hd_fps = hd_extract["fps"]
+                hd_path = Path(hd_extract["local_path"])
+
+            if hd_path and hd_pixels > clip_pixels:
+                # Source HD is better → use it
+                dst = post_final_dir / f"{clip_id}.mp4"
+                shutil.copy2(str(hd_path), str(dst))
+                final_clips.append(FinalClipRecord(
+                    clip_id=clip_id,
+                    post_id=post_id,
+                    final_path=str(dst),
+                    final_kept="source_hd",
+                    zoom_method=zoom_method,
+                ))
+                logger.info(
+                    "select_best: %s → source_hd (%dx%d > %dx%d)",
+                    clip_id, hd_extract["width"], hd_extract["height"],
+                    cr["width"], cr["height"],
+                )
+
+            elif hd_path and hd_pixels == clip_pixels and abs(hd_fps - clip_fps) > 1.0:
+                # Same pixels, different fps → keep BOTH
+                dst_clip = post_final_dir / f"{clip_id}_pd.mp4"
+                dst_hd = post_final_dir / f"{clip_id}_hd.mp4"
+                shutil.copy2(str(clip_path), str(dst_clip))
+                shutil.copy2(str(hd_path), str(dst_hd))
+                final_clips.append(FinalClipRecord(
+                    clip_id=clip_id,
+                    post_id=post_id,
+                    final_path=str(dst_clip),
+                    final_creative_path=str(dst_hd),
+                    final_kept="both",
+                    zoom_method=zoom_method,
+                ))
+                logger.info(
+                    "select_best: %s → both (same pixels, fps: %.1f vs %.1f)",
+                    clip_id, clip_fps, hd_fps,
+                )
+
+            else:
+                # Pixeldrain clip is better or equal → use it
+                dst = post_final_dir / f"{clip_id}.mp4"
+                shutil.copy2(str(clip_path), str(dst))
+                final_clips.append(FinalClipRecord(
+                    clip_id=clip_id,
+                    post_id=post_id,
+                    final_path=str(dst),
+                    final_kept="pixeldrain",
+                    zoom_method=zoom_method,
+                ))
+                logger.info("select_best: %s → pixeldrain", clip_id)
+
+    return {
+        "final_clips": json.dumps([asdict(f) for f in final_clips]),
+        "errors": json.dumps(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: parse_post_metadata   (DESIGN_V1.md §3.8 — rule-based, layer 1)
 # ---------------------------------------------------------------------------
 
 # Date patterns: YYMMDD or YYYYMMDD at start of filename / title
@@ -858,6 +1213,10 @@ _KNOWN_GROUPS = [
     "LE SSERAFIM", "MAMAMOO", "Red Velvet", "ITZY", "Stray Kids",
     "ENHYPEN", "(G)I-DLE", "NMIXX", "KISS OF LIFE", "tripleS",
     "OH MY GIRL", "SISTAR", "T-ARA", "APINK", "EXID", "AOA",
+    "fromis_9", "Kep1er", "VIVIZ", "Brave Girls", "WJSN",
+    "LOONA", "Dreamcatcher", "EVERGLOW", "STAYC", "LIGHTSUM",
+    "Purple Kiss", "Billlie", "CLASS:y", "FIFTY FIFTY", "ILLIT",
+    "QWER", "H1-KEY",
 ]
 _GROUP_RE = re.compile(
     r"\b(" + "|".join(re.escape(g) for g in _KNOWN_GROUPS) + r")\b",
@@ -891,6 +1250,20 @@ _KNOWN_MEMBERS: list[tuple[str, str]] = [
     ("Sakura", "LE SSERAFIM"), ("Chaewon", "LE SSERAFIM"),
     ("Yunjin", "LE SSERAFIM"), ("Kazuha", "LE SSERAFIM"),
     ("Eunchae", "LE SSERAFIM"),
+    # ITZY
+    ("Yeji", "ITZY"), ("Lia", "ITZY"), ("Ryujin", "ITZY"),
+    ("Chaeryeong", "ITZY"), ("Yuna", "ITZY"),
+    # (G)I-DLE
+    ("Miyeon", "(G)I-DLE"), ("Minnie", "(G)I-DLE"),
+    ("Soyeon", "(G)I-DLE"), ("Yuqi", "(G)I-DLE"), ("Shuhua", "(G)I-DLE"),
+    # NMIXX
+    ("Lily", "NMIXX"), ("Haewon", "NMIXX"), ("Sullyoon", "NMIXX"),
+    ("Jinni", "NMIXX"), ("Bae", "NMIXX"), ("Jiwoo", "NMIXX"), ("Kyujin", "NMIXX"),
+    # STAYC
+    ("Sumin", "STAYC"), ("Sieun", "STAYC"), ("Isa", "STAYC"),
+    ("Seeun", "STAYC"), ("Yoon", "STAYC"), ("J", "STAYC"),
+    # QWER
+    ("Hina", "QWER"), ("Siyeon", "QWER"), ("Magenta", "QWER"), ("Chodan", "QWER"),
 ]
 _MEMBER_RE = re.compile(
     r"\b(" + "|".join(re.escape(m[0]) for m in _KNOWN_MEMBERS) + r")\b",
@@ -985,7 +1358,6 @@ def parse_post_metadata(state: dict) -> dict:
         # Find group name
         gm = _GROUP_RE.search(all_text)
         if gm:
-            # Normalize case to known group name
             found = gm.group(1).lower()
             for g in _KNOWN_GROUPS:
                 if g.lower() == found:
@@ -995,7 +1367,6 @@ def parse_post_metadata(state: dict) -> dict:
         # Find individual members
         for mm in _MEMBER_RE.finditer(all_text):
             name_found = mm.group(1)
-            # Normalize to known member name
             for name, grp in _KNOWN_MEMBERS:
                 if name.lower() == name_found.lower():
                     if name not in performers:
@@ -1028,228 +1399,132 @@ def parse_post_metadata(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: analyze
+# Node: store_results  (DESIGN_V1.md §3.8 — write to SQLite)
 # ---------------------------------------------------------------------------
 
-def analyze(state: dict) -> dict:
+def store_results(state: dict, *, db_path: str = "") -> dict:
     """
-    For each clip: quality compare vs source, re-extract if source is better,
-    then run pose analysis for action tagging.
+    Write all pipeline results into SQLite:
+      - posts table (with metadata + initial upvote)
+      - clips table (with alignment + creative edit + final paths)
+      - upvote_log (initial score)
+      - metadata_training_log (rule parse results for V2 improvement)
 
-    Reuses from Pulsify:
-        VideoClipper  — FFmpeg re-extraction
-        YOLOAnalyzer  — pose-based action tags
+    Returns _db_stats with counts for crawl_log.
     """
-    cfg = _load_config(state)
+    from storage.database import (
+        get_connection, init_db, upsert_post, upsert_clip,
+        log_upvote, settle_post, log_metadata_training,
+    )
+
+    if not db_path:
+        cfg = _load_config(state)
+        db_path = str(Path(cfg.workspace) / "fancam.db")
+
+    init_db(db_path)
+
+    posts_raw: list[dict] = json.loads(state.get("posts", "[]"))
     downloads: list[dict] = json.loads(state.get("downloads", "[]"))
     alignments: list[dict] = json.loads(state.get("alignments", "[]"))
+    final_clips: list[dict] = json.loads(state.get("final_clips", "[]"))
+    slowmo_info: dict = json.loads(state.get("slowmo_info", "{}"))
+    post_metas: list[dict] = json.loads(state.get("post_metas", "[]"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
-    analyses: list[AnalysisRecord] = []
 
-    # Pulsify imports
-    try:
-        from pulsify.video_clipper import VideoClipper
-        clipper = VideoClipper()
-    except ImportError as e:
-        errors.append(f"analyze: VideoClipper import failed: {e}")
-        clipper = None
-
-    # Try to import YOLO pose analyzer (optional; skip if not installed)
-    try:
-        from pulsify.analyzer.pose.yolo import YOLOAnalyzer
-        pose_analyzer = YOLOAnalyzer(device="cpu")
-    except Exception:
-        pose_analyzer = None
-        logger.info("YOLO pose analyzer not available — action tags will be empty")
-
-    # Build lookup maps
-    downloads_by_id = {d["clip_id"]: d for d in downloads}
+    # Build lookups
     align_by_clip = {a["clip_id"]: a for a in alignments}
+    final_by_clip = {f["clip_id"]: f for f in final_clips}
+    meta_by_post = {m["post_id"]: m for m in post_metas}
 
-    # Sources lookup
-    sources_by_post: dict[str, list[dict]] = {}
-    for d in downloads:
-        if d["clip_type"] == "source":
-            sources_by_post.setdefault(d["post_id"], []).append(d)
+    now = time.time()
+    clips_new = 0
 
-    clips = [d for d in downloads if d["clip_type"] == "clip"]
+    with get_connection(db_path) as conn:
+        # ── Write posts ──
+        for post_data in posts_raw:
+            post_id = post_data["post_id"]
+            meta = meta_by_post.get(post_id, {})
 
-    for cr in clips:
-        clip_id = cr["clip_id"]
-        clip_path = Path(cr["local_path"])
-        align_rec = align_by_clip.get(clip_id)
-
-        best_path = clip_path
-        upgraded = False
-
-        # --- Quality upgrade: re-extract from source if it's better ---
-        if (
-            align_rec
-            and align_rec["method"] != "unmatched"
-            and clipper is not None
-        ):
-            src_recs = sources_by_post.get(cr["post_id"], [])
-            if src_recs:
-                best_src = max(src_recs, key=lambda r: r["file_size_bytes"])
-                src_path = Path(best_src["local_path"])
-
-                src_quality = best_src["height"] * best_src["fps"]
-                clip_quality = cr["height"] * cr["fps"]
-
-                if src_quality >= clip_quality * cfg.quality_upgrade_factor:
-                    # Re-extract from source
-                    out_path = (
-                        cfg.aligned_dir
-                        / f"{clip_id}_upgraded.mp4"
-                    )
-                    try:
-                        success = clipper.extract_clip(
-                            input_file=str(src_path),
-                            start_time=align_rec["offset_sec"],
-                            duration=cr["duration_sec"],
-                            output_file=str(out_path),
-                        )
-                        if success and out_path.exists():
-                            best_path = out_path
-                            upgraded = True
-                            logger.info(
-                                f"Upgraded {clip_id}: {cr['height']}p → {best_src['height']}p"
-                            )
-                    except Exception as e:
-                        errors.append(f"analyze re-extract {clip_id}: {e}")
-
-        # --- Pose / action analysis ---
-        action_tags: list[str] = []
-        pose_confidence = 0.0
-        if pose_analyzer is not None:
-            try:
-                result = pose_analyzer.analyze(str(best_path))
-                # Derive simple action tags from pose features
-                for frame in (result.frames or []):
-                    for tag, val in frame.features.items():
-                        if isinstance(val, (int, float)) and float(val) > 0.5:
-                            action_tags.append(tag)
-                # Deduplicate
-                action_tags = list(dict.fromkeys(action_tags))
-                pose_confidence = result.score if result else 0.0
-            except Exception as e:
-                logger.warning(f"Pose analysis failed for {clip_id}: {e}")
-
-        info = _video_info(best_path)
-        from storage.organizer import _quality_tag
-        quality_tag = _quality_tag(best_path)
-
-        analyses.append(AnalysisRecord(
-            clip_id=clip_id,
-            quality_tag=quality_tag,
-            best_path=str(best_path),
-            upgraded=upgraded,
-            action_tags=action_tags,
-            pose_confidence=pose_confidence,
-            duration_sec=info["duration_sec"] or cr["duration_sec"],
-        ))
-
-    return {
-        "analyses": json.dumps([asdict(a) for a in analyses]),
-        "errors": json.dumps(errors),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Node: store
-# ---------------------------------------------------------------------------
-
-def store(state: dict) -> dict:
-    """
-    Organise clips into library directory based on LLM identity output.
-
-    The `identities` field is written by the CLAUDE_SDK identify node.
-    This node parses the LLM text, then calls storage.organizer.store_clip().
-    """
-    cfg = _load_config(state)
-    analyses: list[dict] = json.loads(state.get("analyses", "[]"))
-    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
-    alignments: list[dict] = json.loads(state.get("alignments", "[]"))
-    raw_identities: str = state.get("identities", "")
-    errors: list[str] = json.loads(state.get("errors", "[]"))
-
-    from identify.idol_parser import parse_llm_response, IdentityRecord
-    from storage.organizer import store_clip
-
-    # The LLM node may output a JSON array of per-clip results,
-    # or a text block with multiple JSON objects.
-    # We try to parse it as a JSON array first, then line-by-line.
-    identity_map: dict[str, IdentityRecord] = {}
-    try:
-        items = json.loads(raw_identities)
-        if isinstance(items, list):
-            for item in items:
-                clip_id = item.get("clip_id", "")
-                rec = IdentityRecord(
-                    clip_id=clip_id,
-                    group=item.get("group"),
-                    idol=item.get("idol"),
-                    song=item.get("song"),
-                    performance_date=item.get("performance_date"),
-                    confidence=float(item.get("confidence", 0.0)),
-                    notes=item.get("notes", ""),
-                )
-                identity_map[clip_id] = rec
-    except Exception:
-        # Fallback: parse individual LLM text blocks per clip_id
-        for d in downloads:
-            if d["clip_type"] == "clip":
-                cid = d["clip_id"]
-                rec = parse_llm_response(cid, raw_identities)
-                identity_map[cid] = rec
-
-    analyses_by_id = {a["clip_id"]: a for a in analyses}
-    downloads_by_id = {d["clip_id"]: d for d in downloads}
-    align_by_id = {a["clip_id"]: a for a in alignments}
-
-    stored_records = []
-
-    for clip_id, identity in identity_map.items():
-        # Apply confidence threshold
-        if identity.confidence < cfg.id_confidence_threshold:
-            identity.group = None  # force unidentified
-
-        analysis = analyses_by_id.get(clip_id)
-        if not analysis:
-            continue
-
-        dl = downloads_by_id.get(clip_id, {})
-        post_id = dl.get("post_id", "unknown")
-        align_rec = align_by_id.get(clip_id)
-        offset = align_rec["offset_sec"] if align_rec else None
-
-        try:
-            rec = store_clip(
-                clip_path=Path(analysis["best_path"]),
-                library_dir=cfg.library_dir,
-                unidentified_dir=cfg.unidentified_dir,
-                clip_id=clip_id,
+            upsert_post(
+                conn,
                 post_id=post_id,
-                identity=identity,
-                align_offset_sec=offset,
+                subreddit=post_data.get("subreddit", ""),
+                title=post_data.get("title", ""),
+                created_utc=post_data.get("created_utc", 0.0),
+                reddit_url=post_data.get("url", ""),
+                score=post_data.get("score", 0),
+                group_name=meta.get("group_name", ""),
+                performer=", ".join(meta.get("performers", [])),
+                song=meta.get("song_name", ""),
+                perf_date=meta.get("performance_date", ""),
+                crawled_at=now,
             )
-            stored_records.append(rec)
-        except Exception as e:
-            errors.append(f"store {clip_id}: {e}")
-            logger.error(f"Store failed for {clip_id}: {e}")
+
+            # ── Upvote tracking (§3.8) ──
+            created_utc = post_data.get("created_utc", 0.0)
+            score = post_data.get("score", 0)
+            post_age_h = (now - created_utc) / 3600.0 if created_utc > 0 else 999
+
+            if post_age_h < _SETTLED_HOURS:
+                log_upvote(conn, post_id=post_id, score=score,
+                           post_age_hours=post_age_h)
+            else:
+                settle_post(conn, post_id, score)
+
+            # ── Metadata training log ──
+            filenames = [
+                Path(d["local_path"]).name
+                for d in downloads
+                if d["post_id"] == post_id and d.get("pixeldrain_filename")
+            ]
+            log_metadata_training(
+                conn,
+                post_id=post_id,
+                raw_title=post_data.get("title", ""),
+                filename=filenames[0] if filenames else "",
+                rule_result=meta if meta else None,
+            )
+
+        # ── Write clips ──
+        for dl in downloads:
+            if dl["clip_type"] not in ("clip", "source"):
+                continue
+
+            clip_id = dl["clip_id"]
+            align_rec = align_by_clip.get(clip_id, {})
+            final_rec = final_by_clip.get(clip_id, {})
+            clip_slowmo = slowmo_info.get(clip_id, {})
+
+            upsert_clip(
+                conn,
+                clip_id=clip_id,
+                post_id=dl["post_id"],
+                pixeldrain_filename=dl.get("pixeldrain_filename", ""),
+                clip_type=dl["clip_type"],
+                local_path=dl["local_path"],
+                width=dl["width"],
+                height=dl["height"],
+                fps=dl["fps"],
+                duration_sec=dl["duration_sec"],
+                is_slowmo=clip_slowmo.get("is_slowmo", False),
+                speed_factor=clip_slowmo.get("speed_factor", 1.0),
+                is_zoom_in=final_rec.get("is_zoom_in", False),
+                zoom_factor=final_rec.get("zoom_factor", 1.0),
+                zoom_method=final_rec.get("zoom_method", ""),
+                align_method=align_rec.get("method", ""),
+                align_offset_sec=align_rec.get("offset_sec"),
+                align_confidence=align_rec.get("confidence"),
+                align_audio_conf=align_rec.get("audio_conf"),
+                align_dinov2_conf=align_rec.get("dinov2_conf"),
+                align_pose_conf=align_rec.get("pose_conf"),
+                source_clip_id=align_rec.get("source_clip_id", ""),
+                final_path=final_rec.get("final_path", ""),
+                final_creative_path=final_rec.get("final_creative_path", ""),
+                final_kept=final_rec.get("final_kept", ""),
+            )
+            clips_new += 1
 
     return {
-        "stored": json.dumps([
-            {
-                "clip_id": r.clip_id,
-                "final_path": r.final_path,
-                "category": r.category,
-                "group": r.group,
-                "idol": r.idol,
-                "song": r.song,
-                "performance_date": r.performance_date,
-            }
-            for r in stored_records
-        ]),
+        "_db_stats": json.dumps({"clips_new": clips_new}),
         "errors": json.dumps(errors),
     }
