@@ -585,21 +585,29 @@ def summarize(state: dict) -> dict:
         print("[summarize] No transcripts to summarize.")
         return {"summaries": [], "errors": []}
 
-    # Instantiate the configured LLM backend
     from blueprints.business_pipelines.content_retriever.llm_backend import SummarizeLlmBackend
+
+    # Validate primary backend config (fail fast before looping)
     try:
-        llm = SummarizeLlmBackend.from_config(cfg)
+        _probe = SummarizeLlmBackend.from_config(cfg)
     except ValueError as exc:
         return {"summaries": [], "errors": [f"[summarize] bad backend config: {exc}"]}
 
-    if not llm.is_enabled:
+    if not _probe.is_enabled:
         print("[summarize] Backend is 'none' — skipping.")
         return {"summaries": [], "errors": []}
 
+    threshold = getattr(cfg, "summarize_auto_threshold_chars", 60000)
+    max_retries = getattr(cfg, "summarize_max_retries", 3)
+    retry_delay = getattr(cfg, "summarize_retry_delay", 5.0)
+    fallback_backend = getattr(cfg, "summarize_fallback_backend", "") or ""
+
     summaries_data: list[dict] = []
     print(
-        f"[summarize] backend={llm.backend}, model={llm.model!r}, "
-        f"{len(transcripts_data)} transcript(s)"
+        f"[summarize] backend={_probe.backend}, model={_probe.model!r}, "
+        f"{len(transcripts_data)} transcript(s), "
+        f"threshold={threshold:,} chars"
+        + (f", fallback={fallback_backend}" if fallback_backend else "")
     )
 
     for item in transcripts_data:
@@ -625,15 +633,31 @@ def summarize(state: dict) -> dict:
                     pass
                 continue
 
+        # ── Auto backend selection based on transcript length ──────────────
+        transcript_chars = len(transcript)
+        llm, switched = SummarizeLlmBackend.for_transcript(cfg, transcript_chars)
+        if switched:
+            print(
+                f"  [summarize] {post_id}: transcript {transcript_chars:,} chars > "
+                f"threshold {threshold:,} → auto-switch to {llm.backend} ({llm.model})"
+            )
+        elif transcript_chars > threshold and not fallback_backend:
+            # No fallback configured — truncate to threshold with a warning
+            print(
+                f"  [summarize] {post_id}: transcript {transcript_chars:,} chars > "
+                f"threshold {threshold:,} but no fallback configured — truncating."
+            )
+            transcript = transcript[:threshold] + "\n…[截断]"
+
         prompt = _SUMMARIZE_PROMPT.format(
             title=post_title,
             multi_speaker="是" if is_multi else "否（单人）",
             transcript=transcript,
         )
 
-        print(f"  [summarize] {post_id}: {post_title[:40]}...")
+        print(f"  [summarize] {post_id}: {post_title[:40]}… ({transcript_chars:,} chars)")
         try:
-            raw = llm.complete(prompt)
+            raw = llm.complete(prompt, max_retries=max_retries, retry_delay=retry_delay)
 
             # Parse JSON — be lenient with markdown fences
             try:
@@ -664,7 +688,7 @@ def summarize(state: dict) -> dict:
                 print(f"  [summarize] Saved: {summary_path.name}")
 
         except Exception as exc:
-            errors.append(f"[summarize] failed for {post_id}: {exc}")
+            errors.append(f"[summarize] failed for {post_id} after {max_retries} retries: {exc}")
 
     print(f"[summarize] Done. {len(summaries_data)} summary(ies) generated.")
     return {

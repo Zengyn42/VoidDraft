@@ -20,6 +20,13 @@ class PipelineConfig:
     ollama_url: str = "http://localhost:11434"  # Ollama base URL
     credentials_file: str = ""                  # rednote account credentials (EdenGateway)
     gemini_api_key: str = ""                    # Gemini API key (falls back to GEMINI_API_KEY env var)
+    # Auto backend selection — if transcript exceeds threshold, switch to fallback backend
+    summarize_fallback_backend: str = ""        # "gemini" | "claude" | "" (disabled)
+    summarize_fallback_model: str = ""          # model for fallback (e.g. gemini-2.5-flash-preview-05-20)
+    summarize_auto_threshold_chars: int = 60000 # ~30K tokens for mixed Chinese; above this → fallback
+    # Retry config for LLM calls
+    summarize_max_retries: int = 3              # attempts per transcript before giving up
+    summarize_retry_delay: float = 5.0          # base delay in seconds (doubles each retry)
 
     @classmethod
     def from_yaml(cls, path: str) -> "PipelineConfig":
@@ -43,6 +50,11 @@ class PipelineConfig:
             ollama_url=raw.get("ollama_url", "http://localhost:11434"),
             credentials_file=source_block.get("credentials_file", ""),
             gemini_api_key=raw.get("gemini_api_key", ""),
+            summarize_fallback_backend=raw.get("summarize_fallback_backend", ""),
+            summarize_fallback_model=raw.get("summarize_fallback_model", ""),
+            summarize_auto_threshold_chars=int(raw.get("summarize_auto_threshold_chars", 60000)),
+            summarize_max_retries=int(raw.get("summarize_max_retries", 3)),
+            summarize_retry_delay=float(raw.get("summarize_retry_delay", 5.0)),
         )
 
     def to_dict(self) -> dict:
@@ -62,6 +74,11 @@ class PipelineConfig:
             "ollama_url": self.ollama_url,
             "credentials_file": self.credentials_file,
             "gemini_api_key": self.gemini_api_key,
+            "summarize_fallback_backend": self.summarize_fallback_backend,
+            "summarize_fallback_model": self.summarize_fallback_model,
+            "summarize_auto_threshold_chars": self.summarize_auto_threshold_chars,
+            "summarize_max_retries": self.summarize_max_retries,
+            "summarize_retry_delay": self.summarize_retry_delay,
         }
 
     @classmethod
@@ -82,5 +99,10 @@ class PipelineConfig:
             ollama_url=d.get("ollama_url", "http://localhost:11434"),
             credentials_file=d.get("credentials_file", ""),
             gemini_api_key=d.get("gemini_api_key", ""),
+            summarize_fallback_backend=d.get("summarize_fallback_backend", ""),
+            summarize_fallback_model=d.get("summarize_fallback_model", ""),
+            summarize_auto_threshold_chars=int(d.get("summarize_auto_threshold_chars", 60000)),
+            summarize_max_retries=int(d.get("summarize_max_retries", 3)),
+            summarize_retry_delay=float(d.get("summarize_retry_delay", 5.0)),
         )
 

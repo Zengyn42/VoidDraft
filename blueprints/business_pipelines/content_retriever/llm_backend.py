@@ -43,12 +43,34 @@ class SummarizeLlmBackend:
     # Public API
     # ---------------------------------------------------------------------- #
 
-    def complete(self, prompt: str) -> str:
-        """Send a single prompt, return the raw text response."""
+    def complete(self, prompt: str, *, max_retries: int = 3, retry_delay: float = 5.0) -> str:
+        """Send a single prompt, return the raw text response.
+
+        Retries up to `max_retries` times on any transient error with
+        exponential backoff (delay, delay*2, delay*4, …).
+        """
         if self.backend == "none":
             raise RuntimeError(
                 "summarize_backend is 'none'. Set it to 'ollama' or 'claude' in config."
             )
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                return self._dispatch(prompt)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    wait = retry_delay * (2 ** attempt)
+                    print(
+                        f"  [llm_backend] {self.backend} attempt {attempt + 1}/{max_retries} "
+                        f"failed: {exc}. Retrying in {wait:.0f}s…"
+                    )
+                    import time
+                    time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
+    def _dispatch(self, prompt: str) -> str:
+        """Route to the correct backend implementation."""
         if self.backend == "ollama":
             return self._ollama(prompt)
         if self.backend == "claude":
@@ -140,3 +162,33 @@ class SummarizeLlmBackend:
         ollama_url = getattr(cfg, "ollama_url", "http://localhost:11434")
         gemini_api_key = getattr(cfg, "gemini_api_key", "")
         return cls(backend=backend, model=model, ollama_url=ollama_url, gemini_api_key=gemini_api_key)
+
+    @classmethod
+    def for_transcript(
+        cls,
+        cfg: "PipelineConfig",
+        transcript_chars: int,
+    ) -> tuple["SummarizeLlmBackend", bool]:
+        """Return (backend, was_auto_switched).
+
+        If the transcript exceeds `summarize_auto_threshold_chars` AND a
+        fallback backend is configured, switches to the fallback automatically.
+        Returns a flag so the caller can log the decision.
+        """
+        threshold = getattr(cfg, "summarize_auto_threshold_chars", 60000)
+        fallback_backend = getattr(cfg, "summarize_fallback_backend", "") or ""
+        fallback_model = getattr(cfg, "summarize_fallback_model", "") or ""
+        ollama_url = getattr(cfg, "ollama_url", "http://localhost:11434")
+        gemini_api_key = getattr(cfg, "gemini_api_key", "")
+
+        if transcript_chars > threshold and fallback_backend:
+            return (
+                cls(
+                    backend=fallback_backend,
+                    model=fallback_model,
+                    ollama_url=ollama_url,
+                    gemini_api_key=gemini_api_key,
+                ),
+                True,
+            )
+        return cls.from_config(cfg), False

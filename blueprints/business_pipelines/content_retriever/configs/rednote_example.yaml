@@ -21,3 +21,12 @@ summarize_backend: ollama      # "ollama" | "gemini" | "claude" | "none"
 summarize_model: "qwen3.5:27b" # ollama: qwen3.5:27b / gemini: gemini-2.5-flash-preview-05-20
 ollama_url: http://localhost:11434
 # gemini_api_key: ""           # 留空则读 GEMINI_API_KEY 环境变量
+
+# Auto backend selection — 超长转录自动切换到 fallback backend
+summarize_fallback_backend: gemini                    # 超长时切换到 gemini
+summarize_fallback_model: gemini-2.5-flash-preview-05-20
+summarize_auto_threshold_chars: 60000                 # ~30K token，超过则切换
+
+# Retry — LLM 调用失败自动重试
+summarize_max_retries: 3       # 最多重试次数
+summarize_retry_delay: 5.0     # 基础等待秒数（指数退避：5s, 10s, 20s）
