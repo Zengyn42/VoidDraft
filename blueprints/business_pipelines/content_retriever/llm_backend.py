@@ -90,26 +90,44 @@ class SummarizeLlmBackend:
         from framework.nodes.llm.gemini import _CodeAssistClient
 
         model = self.model or "gemini-2.5-pro"
-        client = _CodeAssistClient(model=model, jitter_multiplier=0)
+        # jitter_multiplier=1 → ZenithLoom default 1–20 s jitter on 429/quota errors
+        client = _CodeAssistClient(model=model, jitter_multiplier=1)
         return client._chat_sync(prompt)
 
     def _claude(self, prompt: str) -> str:
-        """claude_agent_sdk.query() — same dependency as ZenithLoom ClaudeSDKNode."""
+        """claude_agent_sdk.query() — same dependency as ZenithLoom ClaudeSDKNode.
+
+        Event-loop safe: if a loop is already running (e.g. inside ZenithLoom's
+        async executor), we schedule the coroutine onto it via
+        concurrent.futures; otherwise we own a fresh loop via asyncio.run().
+        """
         import asyncio
-        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
+        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions, ResultMessage
 
         model = self.model or "claude-sonnet-4-5"
         options = ClaudeAgentOptions(model=model, permission_mode="bypassPermissions")
 
-        async def _run():
+        async def _run() -> str:
             full = ""
             async for event in sdk_query(prompt=prompt, options=options):
-                from claude_agent_sdk import ResultMessage
                 if isinstance(event, ResultMessage):
                     full = event.result or ""
             return full
 
-        return asyncio.run(_run()).strip()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Already inside an async context — run in a thread pool so we
+            # don't block the loop and don't nest asyncio.run().
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, _run())
+                return future.result().strip()
+        else:
+            return asyncio.run(_run()).strip()
 
     # ---------------------------------------------------------------------- #
     # Factory
