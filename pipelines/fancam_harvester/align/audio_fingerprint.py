@@ -89,6 +89,7 @@ def find_offset(
     min_confidence: float = 0.5,
     sr: int = 22050,
     hop_length: int = 512,
+    clip_speed_factor: float = 1.0,
 ) -> AlignResult:
     """
     Find where `clip_video` starts inside `source_video` using chroma features.
@@ -123,21 +124,39 @@ def find_offset(
     if len(clip_audio) < sr:
         raise AlignmentError("Clip audio too short (< 1s) for fingerprinting")
 
+    # Speed factor: resample clip audio to simulate faster playback
+    # clip_speed_factor=2.0 → treat clip as if played at 2× speed
+    if clip_speed_factor != 1.0:
+        import librosa
+        target_len = int(len(clip_audio) / clip_speed_factor)
+        clip_audio = librosa.resample(clip_audio, orig_sr=sr,
+                                      target_sr=int(sr * clip_speed_factor))
+        clip_audio = clip_audio[:target_len] if len(clip_audio) > target_len else clip_audio
+
     src_chroma = _chroma(src_audio, sr, hop_length)
     clip_chroma = _chroma(clip_audio, sr, hop_length)
 
-    clip_frames = clip_chroma.shape[1]
     step_frames = max(1, int(step_sec * sr / hop_length))
+    frames_per_sec = sr / hop_length
+
+    # If clip is longer than source, search for source inside clip instead,
+    # then negate the offset (source starts -offset into the clip).
+    swapped = False
+    if clip_chroma.shape[1] > src_chroma.shape[1]:
+        logger.debug("Clip longer than source — swapping for search")
+        src_chroma, clip_chroma = clip_chroma, src_chroma
+        swapped = True
+
+    clip_frames = clip_chroma.shape[1]
     total_source_frames = src_chroma.shape[1]
 
     logger.debug(
-        f"Source: {total_source_frames} frames, Clip: {clip_frames} frames, "
-        f"step: {step_frames} frames"
+        f"Search: long={total_source_frames} frames, short={clip_frames} frames, "
+        f"step={step_frames} frames, swapped={swapped}"
     )
 
     best_offset = 0.0
     best_sim = 0.0
-    frames_per_sec = sr / hop_length
 
     t = 0
     while t + clip_frames <= total_source_frames:
@@ -155,6 +174,11 @@ def find_offset(
         raise AlignmentError(
             f"Best chroma similarity {best_sim:.3f} < threshold {min_confidence}"
         )
+
+    # If we swapped, the offset means: "source starts at best_offset inside clip"
+    # → clip starts at -best_offset relative to source
+    if swapped:
+        best_offset = -best_offset
 
     logger.info(
         f"Audio aligned: {clip_video.name} → offset={best_offset:.2f}s "

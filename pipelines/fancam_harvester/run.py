@@ -17,14 +17,18 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-# Resolve sys.path so pipeline imports work
+# Resolve sys.path so pipeline imports work.
+# Priority: fancam_harvester (own modules) > lib > VoidDraft root > content_retriever
+# content_retriever is appended so it never shadows same-named modules in fancam_harvester.
 _PIPELINE_DIR = Path(__file__).parent
 _VOIDDRAFT = _PIPELINE_DIR.parent.parent
 _LIB = _VOIDDRAFT / "lib"
 _CONTENT_RETRIEVER = _VOIDDRAFT / "pipelines" / "content_retriever"
-for p in [str(_LIB), str(_VOIDDRAFT), str(_PIPELINE_DIR), str(_CONTENT_RETRIEVER)]:
+for p in [str(_PIPELINE_DIR), str(_LIB), str(_VOIDDRAFT)]:
     if p not in sys.path:
         sys.path.insert(0, p)
+if str(_CONTENT_RETRIEVER) not in sys.path:
+    sys.path.append(str(_CONTENT_RETRIEVER))
 
 from config import FancamConfig
 from state import FancamState
@@ -44,6 +48,8 @@ def run_pipeline(cfg: FancamConfig) -> dict:
         "posts": "[]",
         "downloads": "[]",
         "alignments": "[]",
+        "extracts": "[]",
+        "post_metas": "[]",
         "analyses": "[]",
         "identities": "[]",
         "stored": "[]",
@@ -65,8 +71,28 @@ def run_pipeline(cfg: FancamConfig) -> dict:
     downloads = json.loads(state["downloads"])
     logger.info(f"Downloaded {len(downloads)} files")
 
+    logger.info("=== Step 2b: split merged clips ===")
+    state.update(validators.split_merged(state))
+    downloads = json.loads(state["downloads"])
+    logger.info(f"After split: {len(downloads)} records (including segments)")
+
     logger.info("=== Step 3: align ===")
     state.update(validators.align(state))
+
+    logger.info("=== Step 3b: extract HD clips from source ===")
+    state.update(validators.extract_hd(state))
+    extracts = json.loads(state.get("extracts", "[]"))
+    logger.info(f"Extracted {len(extracts)} HD clip(s)")
+
+    logger.info("=== Step 3c: parse post metadata ===")
+    state.update(validators.parse_post_metadata(state))
+    post_metas = json.loads(state.get("post_metas", "[]"))
+    for pm in post_metas:
+        logger.info(
+            f"  {pm['post_id']}: date={pm['performance_date']}  "
+            f"group={pm['group_name']}  performers={pm['performers']}  "
+            f"song={pm['song_name']!r}"
+        )
 
     logger.info("=== Step 4: analyze ===")
     state.update(validators.analyze(state))

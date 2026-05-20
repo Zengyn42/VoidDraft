@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace as dc_replace
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +89,33 @@ class AlignRecord:
 
 
 @dataclass
+class ExtractRecord:
+    """One HD clip extracted from the source video at the aligned offset."""
+    clip_id: str               # original clip_id this was extracted for
+    source_clip_id: str        # source DownloadRecord this was cut from
+    local_path: str            # path to the extracted HD file
+    start_in_source: float     # offset_sec — where in source this starts
+    end_in_source: float       # start + duration
+    duration_sec: float
+    width: int
+    height: int
+    fps: float
+    confidence: float          # alignment confidence
+    method: str                # alignment method used
+
+
+@dataclass
+class PostMetadata:
+    """Performance metadata parsed from filename / post title / URL."""
+    post_id: str
+    performance_date: str      # "YYYY-MM-DD" or "" if unknown
+    song_name: str             # e.g. "Right Hand Girl"
+    performers: list[str]      # e.g. ["Tzuyu"] or ["TWICE"]
+    group_name: str            # e.g. "TWICE"
+    parse_method: str          # "filename" | "title" | "llm"
+
+
+@dataclass
 class AnalysisRecord:
     clip_id: str
     quality_tag: str           # "4K60fps" etc.
@@ -101,6 +129,15 @@ class AnalysisRecord:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _get_pd_file_id_for_path(path: Path, album_files_raw: list[dict]) -> str | None:
+    """Match a downloaded file path to its Pixeldrain file ID by filename."""
+    name = path.name
+    for f in album_files_raw:
+        if f.get("name", "") == name:
+            return f.get("id")
+    return None
+
 
 def _load_config(state: dict) -> FancamConfig:
     raw = state.get("config", "{}")
@@ -117,13 +154,15 @@ def _video_info(path: Path) -> dict:
 
 
 def _extract_pixeldrain_links(text: str) -> list[str]:
-    import re
     return re.findall(r"https?://pixeldrain\.com/[ul]/[A-Za-z0-9_-]+", text)
 
 
 def _extract_source_links(text: str) -> list[str]:
-    """Extract YouTube / TikTok / Bilibili links."""
-    import re
+    """Extract YouTube / TikTok / Bilibili links.
+
+    Handles both bare URLs and Markdown link syntax [label](URL).
+    Trailing punctuation (closing brackets, commas, dots) is stripped.
+    """
     patterns = [
         r"https?://(?:www\.)?youtube\.com/watch\?[^\s\"'<>]+",
         r"https?://youtu\.be/[A-Za-z0-9_-]+",
@@ -132,8 +171,16 @@ def _extract_source_links(text: str) -> list[str]:
     ]
     links = []
     for pat in patterns:
-        links.extend(re.findall(pat, text))
+        for m in re.findall(pat, text):
+            clean = m.rstrip(").,]")   # strip Markdown-link trailing chars
+            if clean:
+                links.append(clean)
     return list(dict.fromkeys(links))  # deduplicate preserving order
+
+
+# Regex to extract YouTube video IDs embedded in Pixeldrain filenames, e.g.:
+#   "qwer - hina [youtube@uaVz6uzupBY]-1.mp4" → "uaVz6uzupBY"
+_YT_IN_FILENAME_RE = re.compile(r"\[youtube@([A-Za-z0-9_-]{11})\]", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -235,30 +282,154 @@ def download(state: dict) -> dict:
                         download_method="yt-dlp",
                     ))
 
-        # --- Download pixeldrain clips ---
-        for idx, pd_url in enumerate(post_data.get("pixeldrain_urls", [])):
-            clip_id = f"{post_id}_clip{idx}"
+        # --- Download pixeldrain clips (with source/merged classification) ---
+        import re as _re
+        from clip_analyzer import (
+            parse_clip_filename, PixeldrainFile, identify_source_in_album,
+            fill_probe_info,
+        )
+
+        source_platform = post_data.get("platform", "")
+
+        for pd_url in post_data.get("pixeldrain_urls", []):
             dest_dir = cfg.clips_dir / post_id
             dest_dir.mkdir(parents=True, exist_ok=True)
+
+            # Pre-fetch album metadata to classify files before downloading.
+            # ALWAYS run even when we already have an external source — Pixeldrain
+            # native source takes priority if it has higher resolution.
+            list_match = _re.search(r"pixeldrain\.com/l/([A-Za-z0-9_-]+)", pd_url)
+            album_files_raw: list[dict] = []
+            source_file_id: str | None = None
+            album_youtube_ids: list[str] = []  # IDs from filenames like [youtube@ID]
+
+            if list_match:
+                list_id = list_match.group(1)
+                album_files_raw = pd.list_album(list_id)
+                pd_files = [
+                    PixeldrainFile(
+                        file_id=f["id"],
+                        name=f.get("name", f["id"]),
+                        size_bytes=f.get("size", 0),
+                    )
+                    for f in album_files_raw
+                ]
+
+                # Priority 1: Pixeldrain native source candidate
+                source_result = identify_source_in_album(pd_files, source_platform)
+                if source_result.file:
+                    source_file_id = source_result.file.file_id
+                    logger.info(
+                        "Pixeldrain source candidate: %s (%s)",
+                        source_result.file.name, source_result.reason,
+                    )
+
+                # Priority 2: [youtube@ID] embedded in filenames
+                for pf in pd_files:
+                    m = _YT_IN_FILENAME_RE.search(pf.name)
+                    if m:
+                        yt_id = m.group(1)
+                        if yt_id not in album_youtube_ids:
+                            album_youtube_ids.append(yt_id)
+
+            # If Pixeldrain has no native source, try [youtube@ID] fallback.
+            # These are added to source_urls only when the post didn't already
+            # provide them (dedup handled by _extract_source_links).
+            if not source_file_id and album_youtube_ids:
+                existing_yt_urls = set(post_data.get("source_urls", []))
+                yt_fallback_urls = [
+                    f"https://www.youtube.com/watch?v={yt_id}"
+                    for yt_id in album_youtube_ids
+                    if f"https://www.youtube.com/watch?v={yt_id}" not in existing_yt_urls
+                ]
+                if yt_fallback_urls:
+                    logger.info(
+                        "post=%s: downloading %d [youtube@ID] source(s) from album filenames",
+                        post_id, len(yt_fallback_urls),
+                    )
+                    yt_dest = cfg.source_dir / post_id
+                    yt_results = download_urls(
+                        urls=yt_fallback_urls,
+                        dest_dir=yt_dest,
+                        max_duration_sec=300.0,
+                    )
+                    for idx, r in enumerate(yt_results):
+                        cid = f"{post_id}_ytsrc{idx}"
+                        if r.skipped:
+                            errors.append(f"yt-src {cid} skipped: {r.skip_reason}")
+                        elif not r.success:
+                            errors.append(f"yt-src {cid} failed: {r.error}")
+                        else:
+                            records.append(DownloadRecord(
+                                post_id=post_id,
+                                clip_id=cid,
+                                clip_type="source",
+                                url=r.url,
+                                local_path=str(r.local_path),
+                                file_size_bytes=r.file_size_bytes,
+                                duration_sec=r.duration_sec,
+                                width=r.width,
+                                height=r.height,
+                                fps=r.fps,
+                                download_method="yt-dlp",
+                            ))
+
             try:
                 downloaded = pd.download(pd_url, dest_dir)
-                for path in downloaded:
-                    info = _video_info(path)
-                    records.append(DownloadRecord(
-                        post_id=post_id,
-                        clip_id=f"{clip_id}_{path.stem}",
-                        clip_type="clip",
-                        url=pd_url,
-                        local_path=str(path),
-                        file_size_bytes=path.stat().st_size,
-                        duration_sec=info["duration_sec"],
-                        width=info["width"],
-                        height=info["height"],
-                        fps=info["fps"],
-                        download_method="pixeldrain",
-                    ))
             except Exception as e:
-                errors.append(f"clip {clip_id}: {e}")
+                errors.append(f"pixeldrain {pd_url}: {e}")
+                continue
+
+            for path in downloaded:
+                info = _video_info(path)
+                clip_info = parse_clip_filename(path.name)
+                file_id_in_album = _get_pd_file_id_for_path(path, album_files_raw)
+
+                # Classify clip_type
+                if source_file_id and file_id_in_album == source_file_id:
+                    c_type = "source"
+                    # Priority check: Pixeldrain source wins if higher resolution.
+                    # Demote any previously recorded external sources that are lower-res.
+                    pd_pixels = info.get("width", 0) * info.get("height", 0)
+                    for i, r in enumerate(records):
+                        if r.post_id != post_id or r.clip_type != "source":
+                            continue
+                        ext_pixels = r.width * r.height
+                        if pd_pixels >= ext_pixels:
+                            logger.info(
+                                "Pixeldrain source (%dx%d) ≥ external source (%dx%d) "
+                                "— demoting external source '%s' to clip",
+                                info.get("width", 0), info.get("height", 0),
+                                r.width, r.height, r.clip_id,
+                            )
+                            records[i] = dc_replace(r, clip_type="external_ref")
+                        else:
+                            logger.info(
+                                "External source (%dx%d) > Pixeldrain source (%dx%d) "
+                                "— keeping external, storing Pixeldrain as clip",
+                                r.width, r.height,
+                                info.get("width", 0), info.get("height", 0),
+                            )
+                            c_type = "clip"
+                elif clip_info.is_merged:
+                    c_type = "merged"
+                else:
+                    c_type = "clip"
+
+                records.append(DownloadRecord(
+                    post_id=post_id,
+                    clip_id=f"{post_id}_{path.stem}",
+                    clip_type=c_type,
+                    url=(f"https://pixeldrain.com/u/{file_id_in_album}"
+                         if file_id_in_album else pd_url),
+                    local_path=str(path),
+                    file_size_bytes=path.stat().st_size,
+                    duration_sec=info["duration_sec"],
+                    width=info["width"],
+                    height=info["height"],
+                    fps=info["fps"],
+                    download_method="pixeldrain",
+                ))
 
     return {
         "downloads": json.dumps([asdict(r) for r in records]),
@@ -267,55 +438,258 @@ def download(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: split_merged
+# ---------------------------------------------------------------------------
+
+def split_merged(state: dict) -> dict:
+    """
+    For each 'merged' clip: detect scene cuts, split into segments, and
+    add the segments back into the downloads list as 'clip' type.
+
+    Individual clips already present (same post) are used for cut verification
+    to filter false positives.
+
+    The original merged record stays in downloads (clip_type="merged") so it
+    can still be used as reference. New segment records get clip_type="clip".
+    """
+    cfg = _load_config(state)
+    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
+    errors: list[str] = json.loads(state.get("errors", "[]"))
+
+    from pulsify.align.scene_cut import detect_cuts, verify_cuts, flag_duplicate_matches
+
+    new_records: list[dict] = []
+
+    for rec in downloads:
+        if rec["clip_type"] != "merged":
+            continue
+
+        merged_path = Path(rec["local_path"])
+        if not merged_path.exists():
+            errors.append(f"split_merged: file missing {merged_path}")
+            continue
+
+        post_id = rec["post_id"]
+
+        # Collect individual clips for this post
+        individual_clips = [
+            Path(r["local_path"])
+            for r in downloads
+            if r["post_id"] == post_id
+            and r["clip_type"] == "clip"
+            and Path(r["local_path"]).exists()
+        ]
+
+        # ── Optimization: if individual clips already exist, skip splitting ──
+        # The Pixeldrain album already contains the individual segments.
+        # Splitting the merged file would produce duplicates and wasted I/O.
+        if individual_clips:
+            logger.info(
+                "split_merged: post=%s already has %d individual clip(s) — "
+                "skipping split of %s",
+                post_id, len(individual_clips), merged_path.name,
+            )
+            continue
+
+        # Detect cuts
+        try:
+            cut_timestamps = detect_cuts(merged_path, threshold=25.0, min_gap_sec=1.0)
+        except Exception as e:
+            errors.append(f"split_merged detect_cuts {merged_path.name}: {e}")
+            continue
+
+        if not cut_timestamps:
+            logger.info("split_merged: no cuts found in %s — treating as single clip", merged_path.name)
+            continue
+
+        logger.info(
+            "split_merged: %s → %d cut(s) at %s",
+            merged_path.name,
+            len(cut_timestamps),
+            [f"{t:.2f}s" for t in cut_timestamps],
+        )
+
+        # Verify cuts against individual clips (filter false positives)
+        verified_cuts = cut_timestamps
+        if individual_clips:
+            try:
+                verifications = verify_cuts(merged_path, individual_clips, cut_timestamps)
+                verifications = flag_duplicate_matches(verifications)
+                # Keep only verified cuts
+                verified_cuts = [
+                    v.cut_timestamp for v in verifications if v.verified
+                ]
+                false_cuts = [v for v in verifications if not v.verified]
+                if false_cuts:
+                    logger.info(
+                        "split_merged: removed %d false cut(s): %s",
+                        len(false_cuts),
+                        [f"{v.cut_timestamp:.2f}s" for v in false_cuts],
+                    )
+            except Exception as e:
+                logger.warning("split_merged: verify_cuts failed (%s) — using raw cuts", e)
+
+        # Split the merged file at verified cut points
+        seg_dir = Path(rec["local_path"]).parent / f"_segments_{merged_path.stem}"
+        seg_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from pulsify.align.scene_cut import split_at_cuts
+            seg_paths = split_at_cuts(merged_path, verified_cuts, seg_dir)
+        except Exception as e:
+            errors.append(f"split_merged split_at_cuts {merged_path.name}: {e}")
+            continue
+
+        for i, seg_path in enumerate(seg_paths):
+            info = _video_info(seg_path)
+            new_records.append({
+                "post_id": post_id,
+                "clip_id": f"{rec['clip_id']}_seg{i}",
+                "clip_type": "clip",
+                "url": rec["url"],
+                "local_path": str(seg_path),
+                "file_size_bytes": seg_path.stat().st_size,
+                "duration_sec": info["duration_sec"],
+                "width": info["width"],
+                "height": info["height"],
+                "fps": info["fps"],
+                "download_method": "split",
+            })
+            logger.info(
+                "split_merged: segment %d → %s (%.2fs)",
+                i, seg_path.name, info["duration_sec"],
+            )
+
+    # Append new segment records to downloads
+    if new_records:
+        downloads.extend(new_records)
+        logger.info("split_merged: added %d segment clip(s) total", len(new_records))
+
+    return {
+        "downloads": json.dumps(downloads),
+        "errors": json.dumps(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Node: align
 # ---------------------------------------------------------------------------
 
+# Minimum pose confidence to trust motion_find_offset result
+_POSE_CONF_THRESHOLD  = 0.55
+# Minimum audio confidence to trust audio cross-correlation result
+_AUDIO_CONF_THRESHOLD = 0.10
+
 def align(state: dict) -> dict:
-    """Align each clip to its source video, finding the timestamp offset."""
-    cfg = _load_config(state)
+    """
+    Align each fancam clip to its source video.
+
+    Strategy (per clip, in order):
+      1. Audio cross-correlation  — ms-level accuracy, camera-angle independent
+      2. DINOv2 diagonal match    — semantic frame embeddings, robust to different
+                                    camera angles, no audio needed  (fallback)
+      3. Pose motion alignment    — Pulsify motion_find_offset  (last resort)
+    """
     downloads: list[dict] = json.loads(state.get("downloads", "[]"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
     alignments: list[AlignRecord] = []
 
-    from align import align_clip, AlignmentError  # relative to pipeline dir
+    from pulsify.align import audio_find_offset, dinov2_find_offset
+    try:
+        from pulsify.align import motion_find_offset, MotionAlignError
+        _pose_available = True
+    except ImportError:
+        _pose_available = False
 
-    # Build lookup: post_id → source records
+    # Build lookup: post_id → source records and clip records
     sources_by_post: dict[str, list[dict]] = {}
     clips_by_post: dict[str, list[dict]] = {}
+
     for rec in downloads:
         pid = rec["post_id"]
         if rec["clip_type"] == "source":
             sources_by_post.setdefault(pid, []).append(rec)
-        else:
+        elif rec["clip_type"] == "clip":
             clips_by_post.setdefault(pid, []).append(rec)
 
     for post_id, clip_recs in clips_by_post.items():
         source_recs = sources_by_post.get(post_id, [])
         if not source_recs:
-            # No source → mark all clips as unmatched
             for cr in clip_recs:
                 alignments.append(AlignRecord(
                     clip_id=cr["clip_id"],
                     source_clip_id="",
-                    offset_sec=0.0,
-                    confidence=0.0,
-                    method="unmatched",
-                    error="no source downloaded",
+                    offset_sec=0.0, confidence=0.0,
+                    method="unmatched", error="no source downloaded",
                 ))
             continue
 
-        # Use the largest source (most likely the full video)
         best_source = max(source_recs, key=lambda r: r["file_size_bytes"])
 
         for cr in clip_recs:
+            clip_path   = Path(cr["local_path"])
+            source_path = Path(best_source["local_path"])
+
+            if not clip_path.exists() or not source_path.exists():
+                alignments.append(AlignRecord(
+                    clip_id=cr["clip_id"],
+                    source_clip_id=best_source["clip_id"],
+                    offset_sec=0.0, confidence=0.0,
+                    method="unmatched", error="file missing",
+                ))
+                continue
+
+            # ── Strategy 1: audio cross-correlation ──────────────────────
+            audio_offset, audio_conf = audio_find_offset(source_path, clip_path)
+
+            if audio_offset >= 0 and audio_conf >= _AUDIO_CONF_THRESHOLD:
+                alignments.append(AlignRecord(
+                    clip_id=cr["clip_id"],
+                    source_clip_id=best_source["clip_id"],
+                    offset_sec=audio_offset,
+                    confidence=min(1.0, audio_conf * 5),  # scale to [0,1] range
+                    method="audio",
+                ))
+                logger.info(
+                    "Aligned %s via audio: offset=%.3fs  raw_conf=%.3f",
+                    cr["clip_id"], audio_offset, audio_conf,
+                )
+                continue
+
+            # ── Strategy 2: DINOv2 diagonal alignment (no-audio fallback) ──
+            dino_offset, dino_conf = dinov2_find_offset(source_path, clip_path)
+            _DINO_CONF_THRESHOLD = 0.50
+
+            if dino_offset >= 0 and dino_conf >= _DINO_CONF_THRESHOLD:
+                alignments.append(AlignRecord(
+                    clip_id=cr["clip_id"],
+                    source_clip_id=best_source["clip_id"],
+                    offset_sec=dino_offset,
+                    confidence=dino_conf,
+                    method="dinov2",
+                ))
+                logger.info(
+                    "Aligned %s via DINOv2: offset=%.3fs  conf=%.3f",
+                    cr["clip_id"], dino_offset, dino_conf,
+                )
+                continue
+
+            # ── Strategy 3: pose motion alignment (last resort) ──────────
+            if not _pose_available:
+                alignments.append(AlignRecord(
+                    clip_id=cr["clip_id"],
+                    source_clip_id=best_source["clip_id"],
+                    offset_sec=0.0, confidence=0.0,
+                    method="unmatched",
+                    error=f"audio conf={audio_conf:.3f}, dino conf={dino_conf:.3f}, pose unavailable",
+                ))
+                continue
+
             try:
-                result = align_clip(
-                    source_video=Path(best_source["local_path"]),
-                    clip_video=Path(cr["local_path"]),
-                    strategy=cfg.align_strategy,
-                    audio_confidence_threshold=cfg.audio_confidence_threshold,
-                    visual_ssim_threshold=cfg.visual_ssim_threshold,
-                    visual_sample_frames=cfg.visual_sample_frames,
+                result = motion_find_offset(
+                    source_video=source_path,
+                    clip_video=clip_path,
+                    device="cpu",
                 )
                 alignments.append(AlignRecord(
                     clip_id=cr["clip_id"],
@@ -325,22 +699,299 @@ def align(state: dict) -> dict:
                     method=result.method,
                 ))
                 logger.info(
-                    f"Aligned {cr['clip_id']}: offset={result.offset_sec:.2f}s "
-                    f"({result.method}, conf={result.confidence:.2f})"
+                    "Aligned %s via pose: offset=%.2fs conf=%.2f",
+                    cr["clip_id"], result.offset_sec, result.confidence,
                 )
-            except AlignmentError as e:
-                logger.warning(f"Alignment failed for {cr['clip_id']}: {e}")
+            except MotionAlignError as e:
+                logger.warning("Pose alignment failed for %s: %s", cr["clip_id"], e)
                 alignments.append(AlignRecord(
                     clip_id=cr["clip_id"],
                     source_clip_id=best_source["clip_id"],
-                    offset_sec=0.0,
-                    confidence=0.0,
-                    method="unmatched",
-                    error=str(e),
+                    offset_sec=0.0, confidence=0.0,
+                    method="unmatched", error=str(e),
                 ))
 
     return {
         "alignments": json.dumps([asdict(a) for a in alignments]),
+        "errors": json.dumps(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: extract_hd   (step 4 + 5)
+# ---------------------------------------------------------------------------
+
+def extract_hd(state: dict) -> dict:
+    """
+    For every successfully aligned clip, cut the corresponding segment from
+    the source video (which is usually higher resolution) and save it as a
+    backup HD clip.
+
+    Each ExtractRecord stores:
+      - start_in_source / end_in_source  (timestamps in the source file)
+      - local_path of the extracted file
+      - alignment confidence + method
+    """
+    cfg = _load_config(state)
+    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
+    alignments: list[dict] = json.loads(state.get("alignments", "[]"))
+    errors: list[str] = json.loads(state.get("errors", "[]"))
+    extracts: list[ExtractRecord] = []
+
+    try:
+        from pulsify.video_clipper import VideoClipper
+        clipper = VideoClipper()
+    except ImportError as e:
+        errors.append(f"extract_hd: VideoClipper unavailable: {e}")
+        return {"extracts": "[]", "errors": json.dumps(errors)}
+
+    downloads_by_id = {d["clip_id"]: d for d in downloads}
+    align_by_clip = {a["clip_id"]: a for a in alignments}
+
+    hd_dir = Path(cfg.workspace) / "hd_clips"
+    hd_dir.mkdir(parents=True, exist_ok=True)
+
+    for clip_id, align_rec in align_by_clip.items():
+        if align_rec["method"] == "unmatched":
+            continue
+        if align_rec["confidence"] < 0.40:
+            continue
+
+        clip_dl = downloads_by_id.get(clip_id)
+        src_dl  = downloads_by_id.get(align_rec["source_clip_id"])
+        if not clip_dl or not src_dl:
+            continue
+
+        src_path  = Path(src_dl["local_path"])
+        offset    = align_rec["offset_sec"]
+        duration  = clip_dl["duration_sec"]
+
+        if not src_path.exists():
+            errors.append(f"extract_hd: source missing {src_path}")
+            continue
+
+        out_path = hd_dir / f"{clip_id}_hd.mp4"
+        try:
+            success = clipper.extract_clip(
+                input_file=str(src_path),
+                start_time=offset,
+                duration=duration,
+                output_file=str(out_path),
+            )
+        except Exception as e:
+            errors.append(f"extract_hd {clip_id}: {e}")
+            continue
+
+        if not success or not out_path.exists():
+            errors.append(f"extract_hd {clip_id}: extraction returned no file")
+            continue
+
+        info = _video_info(out_path)
+        extracts.append(ExtractRecord(
+            clip_id=clip_id,
+            source_clip_id=align_rec["source_clip_id"],
+            local_path=str(out_path),
+            start_in_source=offset,
+            end_in_source=offset + duration,
+            duration_sec=info.get("duration_sec", duration),
+            width=info.get("width", src_dl["width"]),
+            height=info.get("height", src_dl["height"]),
+            fps=info.get("fps", src_dl["fps"]),
+            confidence=align_rec["confidence"],
+            method=align_rec["method"],
+        ))
+        logger.info(
+            "extract_hd: %s → %s  [%.2fs–%.2fs @ %dx%d]",
+            clip_id, out_path.name,
+            offset, offset + duration,
+            info.get("width", 0), info.get("height", 0),
+        )
+
+    return {
+        "extracts": json.dumps([asdict(e) for e in extracts]),
+        "errors": json.dumps(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: parse_post_metadata   (step 6)
+# ---------------------------------------------------------------------------
+
+# Date patterns: YYMMDD or YYYYMMDD at start of filename / title
+_DATE_YMD6_RE  = re.compile(r"\b(\d{2})(\d{2})(\d{2})\b")   # 260517 → 2026-05-17
+_DATE_YMD8_RE  = re.compile(r"\b(20\d{2})(\d{2})(\d{2})\b") # 20260517
+
+# Common k-pop girl group names (extend as needed)
+_KNOWN_GROUPS = [
+    "TWICE", "BLACKPINK", "aespa", "NewJeans", "IVE", "BABYMONSTER",
+    "LE SSERAFIM", "MAMAMOO", "Red Velvet", "ITZY", "Stray Kids",
+    "ENHYPEN", "(G)I-DLE", "NMIXX", "KISS OF LIFE", "tripleS",
+    "OH MY GIRL", "SISTAR", "T-ARA", "APINK", "EXID", "AOA",
+]
+_GROUP_RE = re.compile(
+    r"\b(" + "|".join(re.escape(g) for g in _KNOWN_GROUPS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Known members / solo artists — (name, group) pairs
+_KNOWN_MEMBERS: list[tuple[str, str]] = [
+    # TWICE
+    ("Nayeon", "TWICE"), ("Jeongyeon", "TWICE"), ("Momo", "TWICE"),
+    ("Sana", "TWICE"), ("Jihyo", "TWICE"), ("Mina", "TWICE"),
+    ("Dahyun", "TWICE"), ("Chaeyoung", "TWICE"), ("Tzuyu", "TWICE"),
+    # BLACKPINK
+    ("Jisoo", "BLACKPINK"), ("Jennie", "BLACKPINK"),
+    ("Rosé", "BLACKPINK"), ("Lisa", "BLACKPINK"),
+    # aespa
+    ("Karina", "aespa"), ("Giselle", "aespa"),
+    ("Winter", "aespa"), ("Ningning", "aespa"),
+    # NewJeans
+    ("Minji", "NewJeans"), ("Hanni", "NewJeans"), ("Danielle", "NewJeans"),
+    ("Haerin", "NewJeans"), ("Hyein", "NewJeans"),
+    # IVE
+    ("Yujin", "IVE"), ("Gaeul", "IVE"), ("Rei", "IVE"),
+    ("Wonyoung", "IVE"), ("Liz", "IVE"), ("Leeseo", "IVE"),
+    # BABYMONSTER
+    ("Ruka", "BABYMONSTER"), ("Pharita", "BABYMONSTER"),
+    ("Asa", "BABYMONSTER"), ("Rami", "BABYMONSTER"),
+    ("Rora", "BABYMONSTER"), ("Chiquita", "BABYMONSTER"),
+    ("Ahyeon", "BABYMONSTER"),
+    # LE SSERAFIM
+    ("Sakura", "LE SSERAFIM"), ("Chaewon", "LE SSERAFIM"),
+    ("Yunjin", "LE SSERAFIM"), ("Kazuha", "LE SSERAFIM"),
+    ("Eunchae", "LE SSERAFIM"),
+]
+_MEMBER_RE = re.compile(
+    r"\b(" + "|".join(re.escape(m[0]) for m in _KNOWN_MEMBERS) + r")\b",
+    re.IGNORECASE,
+)
+_MEMBER_TO_GROUP = {m[0].lower(): m[1] for m in _KNOWN_MEMBERS}
+
+
+def _parse_date(text: str) -> str:
+    """Extract performance date from filename or title. Returns 'YYYY-MM-DD' or ''."""
+    # Try YYYYMMDD first (more specific)
+    m = _DATE_YMD8_RE.search(text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # Try YYMMDD (assume 20xx)
+    m = _DATE_YMD6_RE.search(text)
+    if m:
+        yy, mm, dd = m.group(1), m.group(2), m.group(3)
+        # Validate month/day range to avoid false matches
+        if 1 <= int(mm) <= 12 and 1 <= int(dd) <= 31:
+            return f"20{yy}-{mm}-{dd}"
+    return ""
+
+
+def _parse_song_name(title: str, performers: list[str], group: str) -> str:
+    """
+    Heuristically extract song name from post title.
+    Strategy: remove known group/member names, date patterns, and common
+    bracket noise; what remains is likely the song name.
+    """
+    text = title
+    # Remove group + member names
+    text = _GROUP_RE.sub("", text)
+    text = _MEMBER_RE.sub("", text)
+    # Remove date patterns
+    text = _DATE_YMD8_RE.sub("", text)
+    text = _DATE_YMD6_RE.sub("", text)
+    # Remove common bracket noise like [직캠] [Fancam] (4K) etc.
+    text = re.sub(r"[\[\(][^\]\)]{1,30}[\]\)]", "", text)
+    # Remove common suffixes
+    text = re.sub(
+        r"\b(fancam|fan\s*cam|직캠|4k|hd|60fps|stage|focus|직캠|mc)\b",
+        "", text, flags=re.IGNORECASE,
+    )
+    # Collapse whitespace and strip punctuation edges
+    text = re.sub(r"[_\-|]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" :-|/\\")
+    return text if len(text) > 1 else ""
+
+
+def parse_post_metadata(state: dict) -> dict:
+    """
+    Parse performance date, song name, and performers from post title and
+    downloaded filenames. Results stored as PostMetadata list.
+
+    Falls back gracefully — empty strings for fields that can't be parsed.
+    LLM identify step can override/enrich these later.
+    """
+    posts_raw: list[dict] = json.loads(state.get("posts", "[]"))
+    downloads: list[dict] = json.loads(state.get("downloads", "[]"))
+    errors: list[str] = json.loads(state.get("errors", "[]"))
+    post_metas: list[PostMetadata] = []
+
+    # Build set of filenames per post for richer parsing
+    filenames_by_post: dict[str, list[str]] = {}
+    for dl in downloads:
+        filenames_by_post.setdefault(dl["post_id"], []).append(
+            Path(dl["local_path"]).name
+        )
+
+    for post in posts_raw:
+        post_id = post.get("post_id", post.get("id", ""))
+        title   = post.get("title", "")
+        filenames = filenames_by_post.get(post_id, [])
+
+        # Search title + all filenames for metadata
+        search_texts = [title] + filenames
+
+        # Date: try title first, then filenames
+        perf_date = ""
+        for text in search_texts:
+            perf_date = _parse_date(text)
+            if perf_date:
+                break
+
+        # Performers + group
+        performers: list[str] = []
+        group_name = ""
+
+        all_text = " ".join(search_texts)
+
+        # Find group name
+        gm = _GROUP_RE.search(all_text)
+        if gm:
+            # Normalize case to known group name
+            found = gm.group(1).lower()
+            for g in _KNOWN_GROUPS:
+                if g.lower() == found:
+                    group_name = g
+                    break
+
+        # Find individual members
+        for mm in _MEMBER_RE.finditer(all_text):
+            name_found = mm.group(1)
+            # Normalize to known member name
+            for name, grp in _KNOWN_MEMBERS:
+                if name.lower() == name_found.lower():
+                    if name not in performers:
+                        performers.append(name)
+                    if not group_name:
+                        group_name = grp
+                    break
+
+        # Song name
+        song = _parse_song_name(title, performers, group_name)
+
+        post_metas.append(PostMetadata(
+            post_id=post_id,
+            performance_date=perf_date,
+            song_name=song,
+            performers=performers,
+            group_name=group_name,
+            parse_method="filename" if perf_date and (performers or group_name) else "title",
+        ))
+
+        logger.info(
+            "parse_post_metadata: post=%s  date=%s  group=%s  performers=%s  song=%r",
+            post_id, perf_date, group_name, performers, song,
+        )
+
+    return {
+        "post_metas": json.dumps([asdict(m) for m in post_metas]),
         "errors": json.dumps(errors),
     }
 

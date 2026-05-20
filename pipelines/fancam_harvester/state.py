@@ -22,6 +22,8 @@ class FancamState(TypedDict):
     posts: str         # JSON: list[PostMeta]
     downloads: str     # JSON: list[DownloadRecord]
     alignments: str    # JSON: list[AlignRecord]
+    extracts: str      # JSON: list[ExtractRecord]   — HD clips cut from source
+    post_metas: str    # JSON: list[PostMetadata]    — date/song/performer per post
     analyses: str      # JSON: list[AnalysisRecord]
     identities: str    # JSON: list[IdentityRecord] — filled by LLM node
     stored: str        # JSON: list[StoredRecord]
