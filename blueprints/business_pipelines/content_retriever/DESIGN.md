@@ -19,7 +19,7 @@
 ## 2. 文件结构
 
 ```
-functional_graphs/content_retriever/
+blueprints/business_pipelines/content_retriever/
 ├── DESIGN.md          ← 本文件
 ├── entity.json        ← ZenithLoom entry/exit 声明
 ├── graph.py           ← LangGraph 图定义（EntityLoader 优先加载）
@@ -125,7 +125,7 @@ ZenithLoom `EntityLoader` 按以下优先级加载图：
 // 父图 agent.json 节点配置
 {
   "id": "content_retriever",
-  "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/content_retriever",
+  "agent_dir": "/home/kingy/Foundation/VoidDraft/blueprints/business_pipelines/content_retriever",
   "session_mode": "fresh_per_call",
   "routing_hint": "当需要抓取并处理小红书视频时使用"
 }

@@ -22,7 +22,7 @@ from pathlib import Path
 # PipelineConfig dataclass
 # ---------------------------------------------------------------------------
 
-from functional_graphs.content_retriever.config import PipelineConfig
+from blueprints.business_pipelines.content_retriever.config import PipelineConfig
 
 
 def _load_list(state: dict, key: str) -> list:
@@ -586,7 +586,7 @@ def summarize(state: dict) -> dict:
         return {"summaries": [], "errors": []}
 
     # Instantiate the configured LLM backend
-    from functional_graphs.content_retriever.llm_backend import SummarizeLlmBackend
+    from blueprints.business_pipelines.content_retriever.llm_backend import SummarizeLlmBackend
     try:
         llm = SummarizeLlmBackend.from_config(cfg)
     except ValueError as exc:

@@ -104,7 +104,7 @@ async def main():
     print("现在可以运行 pipeline：")
     print("  cd /home/kingy/Foundation/VoidDraft")
     print("  python3 -m pipelines.content_retriever.run \\")
-    print("    --config functional_graphs/content_retriever/configs/rednote_example.yaml \\")
+    print("    --config blueprints/business_pipelines/content_retriever/configs/rednote_example.yaml \\")
     print("    --max-posts 3")
 
 

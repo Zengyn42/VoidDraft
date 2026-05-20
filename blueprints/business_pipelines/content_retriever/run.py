@@ -3,9 +3,9 @@
 Content Retriever Pipeline — standalone CLI runner (LangGraph edition).
 
 Usage:
-    python3 -m functional_graphs.content_retriever.run --config configs/rednote_example.yaml
-    python3 -m functional_graphs.content_retriever.run --config configs/rednote_example.yaml --max-posts 5
-    python3 -m functional_graphs.content_retriever.run --config configs/rednote_example.yaml --summarize-backend ollama --summarize-model qwen2.5:7b
+    python3 -m blueprints.business_pipelines.content_retriever.run --config configs/rednote_example.yaml
+    python3 -m blueprints.business_pipelines.content_retriever.run --config configs/rednote_example.yaml --max-posts 5
+    python3 -m blueprints.business_pipelines.content_retriever.run --config configs/rednote_example.yaml --summarize-backend ollama --summarize-model qwen2.5:7b
 
 Graph is defined in graph.py and follows the ZenithLoom awaken pattern:
     entry node : fetch
@@ -25,8 +25,8 @@ _VOIDRAFT_ROOT = _HERE.parent.parent          # …/VoidDraft
 if str(_VOIDRAFT_ROOT) not in sys.path:
     sys.path.insert(0, str(_VOIDRAFT_ROOT))
 
-from functional_graphs.content_retriever.config import PipelineConfig
-from functional_graphs.content_retriever.graph import build_graph
+from blueprints.business_pipelines.content_retriever.config import PipelineConfig
+from blueprints.business_pipelines.content_retriever.graph import build_graph
 
 
 # --------------------------------------------------------------------------- #

@@ -32,15 +32,15 @@ import json
 
 from langgraph.graph import StateGraph, START, END
 
-from functional_graphs.content_retriever.state import ContentRetrieverState
-from functional_graphs.content_retriever.validators import (
+from blueprints.business_pipelines.content_retriever.state import ContentRetrieverState
+from blueprints.business_pipelines.content_retriever.validators import (
     fetch,
     download,
     transcribe,
     summarize,
     report,
 )
-from functional_graphs.content_retriever.config import PipelineConfig
+from blueprints.business_pipelines.content_retriever.config import PipelineConfig
 
 
 # --------------------------------------------------------------------------- #

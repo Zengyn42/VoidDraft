@@ -21,7 +21,7 @@
       {
         "id": "sandbox_eval",
         "type": "DETERMINISTIC",
-        "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/tool_discovery"
+        "agent_dir": "/home/kingy/Foundation/VoidDraft/blueprints/functional_graphs/tool_discovery"
       },
       {
         "id": "report_gen",

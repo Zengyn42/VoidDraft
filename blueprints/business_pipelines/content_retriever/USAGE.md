@@ -8,7 +8,7 @@
 cd /home/kingy/Foundation/VoidDraft
 
 python3 -m pipelines.content_retriever.run \
-  --config functional_graphs/content_retriever/configs/rednote_example.yaml \
+  --config blueprints/business_pipelines/content_retriever/configs/rednote_example.yaml \
   --max-posts 10
 ```
 
@@ -251,7 +251,7 @@ HuggingFace 账号未授权 pyannote 模型。访问以下两个链接 agree 条
 ```json
 {
   "id": "content_retriever",
-  "agent_dir": "/home/kingy/Foundation/VoidDraft/functional_graphs/content_retriever",
+  "agent_dir": "/home/kingy/Foundation/VoidDraft/blueprints/business_pipelines/content_retriever",
   "session_mode": "fresh_per_call",
   "routing_hint": "当需要抓取并转录小红书收藏视频时使用"
 }

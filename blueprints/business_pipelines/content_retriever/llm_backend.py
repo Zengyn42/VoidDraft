@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from functional_graphs.content_retriever.config import PipelineConfig
+    from blueprints.business_pipelines.content_retriever.config import PipelineConfig
 
 
 class SummarizeLlmBackend:

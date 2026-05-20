@@ -112,29 +112,46 @@ Pixeldrain 相册中:
 
 ```python
 SlowmoInfo.is_slowmo: bool
-SlowmoInfo.speed_factor: float   # e.g. 0.5 = 半速慢放
+SlowmoInfo.speed_factor: float   # e.g. 2.0 = 2倍慢放（半速）
+SlowmoInfo.detected_by: str      # "fps_metadata" | "audio_bpm" | "flow_magnitude" | "none"
 ```
+
+**三层检测策略**（按可靠性排序）：
+1. **FPS 元数据**：`r_frame_rate / avg_frame_rate > 1.5` → slowmo（最可靠）
+2. **音频 BPM**：librosa 节拍追踪，BPM < 75 → 2x / BPM < 45 → 4x
+3. **光流幅度**：Farneback，幅度 < threshold×0.65 → 2x / < 0.4 → 4x
 
 - `is_slowmo=True` → 标记 `is_slowmo=True, speed_factor`，**不跳过对齐**，用 `try_alignment_with_speed_factors` 做速度补偿对齐
 
-### 3.5 Align（三层策略）
+### 3.5 Align（并行竞选策略）
 
-对每个 pixeldrain clip，对齐到 source clip：
+**设计原则**：三层方法并行运行，取置信度最高的结果。不使用串行 fallback（避免低阈值静默错误）。
 
 ```
-1. Audio cross-correlation  → offset_sec, conf
-   conf ≥ 0.10              → method="audio"
+慢放 clip：对每层方法先用 try_alignment_with_speed_factors([1.0, 2.0, 4.0])
+           找出最佳 speed_factor，再参与竞选
 
-2. DINOv2 diagonal match    → offset_sec, conf
-   conf ≥ 0.50              → method="dinov2"
+并行运行：
+  ├─ Audio chroma   → (offset_sec, conf_a)
+  │   实现：VoidDraft audio_fingerprint.find_offset
+  │         chroma 特征 + librosa resample 速度补偿
+  │
+  ├─ DINOv2 diagonal → (offset_sec, conf_d)
+  │   实现：pulsify.align.dinov2_align.dinov2_find_offset
+  │
+  └─ YOLO pose motion → (offset_sec, conf_p)
+      实现：pulsify.align.motion_align.find_offset
 
-3. YOLO pose motion         → offset_sec, conf
-   conf ≥ 0.55              → method="pose"
+竞选：选 conf 最高的结果作为最终输出
+  → align_method = "audio" | "dinov2" | "pose"
+  → align_confidence = 最高 conf 值
+  → 若最高 conf < 0.10 → method="unmatched"
 
-全部失败                    → method="unmatched"
+所有三层的结果均记录到 DB（align_audio_conf / align_dinov2_conf / align_pose_conf），
+用于后续参数调优分析。
 ```
 
-慢放 clip：`try_alignment_with_speed_factors(speed_factor)` 插入第一层前。
+⚠️ 已知限制：DINOv2/YOLO 不支持 speed_factor，slowmo 时这两层以 speed_factor=1.0 参与竞选（即忽略速度差），仍可能给出有用的视觉对齐结果。
 
 ### 3.6 Zoom 检测
 
@@ -182,7 +199,28 @@ is_slowmo OR is_zoom_in → 有创意加工
 
 ### 3.8 元数据识别 + 初始点赞记录
 
-**LLM 识别**（基于帖子标题 + 评论）：
+**元数据提取策略（两层，按优先级）：**
+
+**层 1：规则解析（零成本，优先）**
+
+从以下来源按顺序提取：
+1. Pixeldrain 文件名（最可靠）：`Hina IVE HEYA 20240301.mp4`
+2. YouTube 视频标题（via yt-dlp `--dump-json`）
+3. Reddit 帖子标题
+
+常见模式：
+```
+{performer} {group} {song} {date}
+[MV] {group} - {song}
+{group} '{song}' {perf_event}
+```
+
+**层 2：LLM 补全（规则解析失败或 confidence 低时调用）**
+- 语言范围：**仅英文 + 韩文**（不处理日文/泰文/中文）
+- 输入：帖子标题 + 规则解析已提取到的字段（作为上下文）
+- 输出：`group_name, performer, song, perf_date, confidence`
+- 失败策略：LLM 返回 confidence < 0.6 → 字段留空，不写错误数据
+
 ```
 group_name, performer, song, perf_date, confidence
 ```
@@ -213,6 +251,8 @@ post_age ≥ 48h → posts.final_score=score, posts.settled=True
 ---
 
 ## 四、SQLite Schema
+
+> 初始化时必须执行：`PRAGMA journal_mode=WAL;`（支持并发读写）
 
 ```sql
 -- 帖子主表
@@ -251,10 +291,13 @@ CREATE TABLE IF NOT EXISTS clips (
     zoom_factor         REAL    DEFAULT 1.0,
     zoom_method         TEXT,               -- "face" | "aspect_ratio" | "no_source"
 
-    -- 对齐结果
-    align_method        TEXT,               -- "audio"|"dinov2"|"pose"|"unmatched"
+    -- 对齐结果（并行竞选，三层均记录）
+    align_method        TEXT,               -- "audio"|"dinov2"|"pose"|"unmatched"（最终选用）
     align_offset_sec    REAL,
-    align_confidence    REAL,
+    align_confidence    REAL,               -- 最终选用层的置信度
+    align_audio_conf    REAL,               -- audio 层原始置信度（调优用）
+    align_dinov2_conf   REAL,               -- dinov2 层原始置信度（调优用）
+    align_pose_conf     REAL,               -- pose 层原始置信度（调优用）
     source_clip_id      TEXT,               -- 对应的 source clip 记录
 
     -- Final clip 输出
@@ -272,6 +315,19 @@ CREATE TABLE IF NOT EXISTS upvote_log (
     score           INTEGER NOT NULL
 );
 
+-- 元数据训练日志（规则解析失败 + LLM 补全的标题，供 V2 改进正则）
+CREATE TABLE IF NOT EXISTS metadata_training_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id         TEXT NOT NULL,
+    raw_title       TEXT,                   -- Reddit 帖子原始标题
+    filename        TEXT,                   -- Pixeldrain 文件名（若有）
+    yt_title        TEXT,                   -- YouTube 标题（若有）
+    rule_result     TEXT,                   -- JSON: 规则解析结果
+    llm_result      TEXT,                   -- JSON: LLM 补全结果
+    llm_confidence  REAL,
+    recorded_at     REAL NOT NULL
+);
+
 -- Cron 运行日志
 CREATE TABLE IF NOT EXISTS crawl_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,13 +336,63 @@ CREATE TABLE IF NOT EXISTS crawl_log (
     posts_new       INTEGER DEFAULT 0,
     posts_updated   INTEGER DEFAULT 0,
     clips_new       INTEGER DEFAULT 0,
+    album_api_calls INTEGER DEFAULT 0,      -- 本次 list_album() 调用次数（API 成本测量）
     errors          TEXT                    -- JSON array of error strings
 );
 ```
 
 ---
 
-## 五、已知问题 / V2 Backlog
+## 五、参数调优记录
+
+> 所有"魔法数字"集中于此，初始值为合理经验值，实验后更新。
+> 格式：参数 | 当前值 | 来源/依据 | 实验结果
+
+### 5.1 对齐阈值
+
+> 并行竞选模式下，阈值仅用于判断「unmatched」（最高 conf < min_accept 才算失败），不再作为串行门控。
+
+| 参数 | 当前值 | 依据 | 实验记录 |
+|------|--------|------|---------|
+| `align_min_accept` | 0.10 | 低于此值三层全失败 → unmatched | - |
+| `audio_conf_ref` | 0.10 | 参考基线（已记录，不作门控） | - |
+| `dinov2_conf_ref` | 0.50 | 参考基线 | - |
+| `pose_conf_ref` | 0.55 | 参考基线 | - |
+
+### 5.2 Slowmo 检测阈值
+
+| 参数 | 当前值 | 依据 | 实验记录 |
+|------|--------|------|---------|
+| `fps_ratio_min` | 1.5 | r_fps / avg_fps，2x 慢放手机视频典型值约 2.0 | - |
+| `bpm_2x_max` | 75 | K-pop 正常 90-180 BPM 的一半 | - |
+| `bpm_4x_max` | 45 | 四分之一 | - |
+| `flow_2x_ratio` | 0.65 | 光流幅度相对 normal 的比例 | - |
+| `flow_4x_ratio` | 0.40 | 同上 | - |
+| `speed_factor_candidates` | [1.0, 2.0, 4.0] | 常见慢放倍数 | - |
+
+### 5.3 Zoom 检测阈值
+
+| 参数 | 当前值 | 依据 | 实验记录 |
+|------|--------|------|---------|
+| `zoom_threshold` | 1.5 | clip 人脸面积/source 人脸面积 > 1.5 判定为 zoom-in | - |
+| `ar_diff_threshold` | 0.15 | 宽高比差的 fallback 阈值 | - |
+
+### 5.4 点赞 settled 策略
+
+| 参数 | 当前值 | 依据 | 实验记录 |
+|------|--------|------|---------|
+| `settled_hours` | 48 | Reddit 帖子点赞增长通常在 24-48h 趋于稳定 | - |
+
+### 5.5 LLM 元数据识别
+
+| 参数 | 当前值 | 依据 | 实验记录 |
+|------|--------|------|---------|
+| `llm_conf_min` | 0.6 | 低于此置信度的字段留空，不写错误数据 | - |
+| 语言范围 | 英文 + 韩文 | V1 覆盖主要来源 | - |
+
+---
+
+## 七、已知问题 / V2 Backlog
 
 | # | 描述 | 优先级 |
 |---|---|---|
@@ -298,7 +404,7 @@ CREATE TABLE IF NOT EXISTS crawl_log (
 
 ---
 
-## 六、待确认事项（实现前需回答）
+## 八、待确认事项（实现前需回答）
 
 *（本节在实现开始前清空）*
 
@@ -306,7 +412,7 @@ CREATE TABLE IF NOT EXISTS crawl_log (
 
 ---
 
-## 七、实现任务列表
+## 九、实现任务列表
 
 按依赖顺序：
 
