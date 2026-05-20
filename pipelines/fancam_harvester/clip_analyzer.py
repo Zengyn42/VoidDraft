@@ -374,60 +374,74 @@ def identify_source_in_album(
     Given a Pixeldrain album file list, identify which file is likely the
     original source video.
 
-    Rules (all must pass):
-      1. Largest file by size_bytes in the album.
-      2. No clip-marker in filename ("Clip 1", "pt2", "_1", etc.).
+    Candidate selection:
+      - Exclude files that are merged compilations (parse_clip_filename().is_merged)
+        OR have clip-markers in their name.
+      - Among remaining candidates, pick the one with highest pixel count
+        (width × height) if probed, otherwise fall back to largest file size.
+
+    Rules applied to the winning candidate:
       3. duration_sec > min_duration_sec  (if probed; skip if 0.0).
       4. has_audio is True  (if probed; skip if not probed yet).
-      5. source_platform matches RedNote/TikTok  (if provided; skip if empty).
 
     Returns the candidate file, or None with a reason string.
     """
     if not files:
         return SourceCandidateResult(file=None, reason="empty album")
 
-    # Rule 1: largest file
-    largest = max(files, key=lambda f: f.size_bytes)
+    # Filter out merged compilations and clip-indexed files
+    candidates = [
+        f for f in files
+        if not parse_clip_filename(f.name).is_merged
+        and not _has_clip_marker(f.name)
+    ]
 
-    # Rule 2: no clip marker in name
-    if _has_clip_marker(largest.name):
+    if not candidates:
         return SourceCandidateResult(
             file=None,
-            reason=f"largest file '{largest.name}' has clip-marker in name",
+            reason="all files are merged compilations or have clip-markers",
         )
 
+    # Pick best candidate: highest resolution if probed, else largest file size
+    def _score(f: PixeldrainFile) -> tuple:
+        pixels = f.width * f.height  # 0 if not probed
+        return (pixels, f.size_bytes)
+
+    best = max(candidates, key=_score)
+
     # Rule 3: duration (only checked if probed)
-    if largest.duration_sec > 0 and largest.duration_sec < min_duration_sec:
+    if best.duration_sec > 0 and best.duration_sec < min_duration_sec:
         return SourceCandidateResult(
             file=None,
             reason=(
-                f"largest file '{largest.name}' duration "
-                f"{largest.duration_sec:.1f}s < {min_duration_sec}s"
+                f"best candidate '{best.name}' duration "
+                f"{best.duration_sec:.1f}s < {min_duration_sec}s"
             ),
         )
 
     # Rule 4: has audio (only checked if probed)
-    if largest.duration_sec > 0 and not largest.has_audio:
+    if best.duration_sec > 0 and not best.has_audio:
         return SourceCandidateResult(
             file=None,
-            reason=f"largest file '{largest.name}' has no audio track",
+            reason=f"best candidate '{best.name}' has no audio track",
         )
 
-    # Rule 5: platform hint (optional)
+    # Platform hint (informational only)
     if source_platform and not _REDNOTE_TIKTOK_RE.search(source_platform):
-        # Platform is specified but is NOT RedNote/TikTok — less confident
         logger.debug(
             "source_platform='%s' is not RedNote/TikTok; "
-            "still checking if largest file qualifies",
+            "still checking if best candidate qualifies",
             source_platform,
         )
 
+    reason = "highest resolution" if best.width > 0 else "largest + no clip-marker/merged"
     logger.info(
-        "Source candidate identified: '%s' (%d MB)",
-        largest.name,
-        largest.size_bytes // (1024 * 1024),
+        "Source candidate identified: '%s' (%d MB, %dx%d)",
+        best.name,
+        best.size_bytes // (1024 * 1024),
+        best.width, best.height,
     )
-    return SourceCandidateResult(file=largest, reason="largest + no clip-marker")
+    return SourceCandidateResult(file=best, reason=reason)
 
 
 
