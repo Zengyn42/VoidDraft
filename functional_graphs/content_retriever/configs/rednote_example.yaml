@@ -1,0 +1,23 @@
+source:
+  type: rednote
+  account_user_id: 60b6bf360000000001007c35   # 账号 ID（从 profile URL 里取）
+  mode: favorites       # favorites=收藏 | posted=发布 | target_url | search
+  max_scroll: 80        # 滚动次数（200个视频约需80次）
+  request_delay: 1.5    # 每个帖子间隔秒数
+  video_only: true      # 只收集视频帖（跳过图文）
+  credentials_file: kknd2024.json   # EdenGateway/rednote/accounts/ 下的账号文件
+
+download_dir: /home/kingy/Foundation/EdenGateway/rednote_downloads
+max_posts: 200
+analyzer: none          # 视频转文字走 transcribe 节点，不用视觉 analyzer
+analyze_model:
+frame_interval: 10
+max_frames: 8
+pixeldrain_api_key:
+
+# ── LLM Summarisation ──────────────────────────────────────────────────────
+summarize: true
+summarize_backend: ollama      # "ollama" | "gemini" | "claude" | "none"
+summarize_model: "qwen3.5:27b" # ollama: qwen3.5:27b / gemini: gemini-2.5-flash-preview-05-20
+ollama_url: http://localhost:11434
+# gemini_api_key: ""           # 留空则读 GEMINI_API_KEY 环境变量

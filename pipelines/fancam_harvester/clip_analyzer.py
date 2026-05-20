@@ -529,3 +529,216 @@ def better_quality(path_a: Path, path_b: Path) -> str:
     if sa > 0 and sb > 0 and abs(sa - sb) / max(sa, sb) < 0.05:
         return "equal"
     return "a" if sa >= sb else "b"
+
+
+# ---------------------------------------------------------------------------
+# cv2 optional import (guarded — used only by zoom_detect)
+# ---------------------------------------------------------------------------
+
+try:
+    import cv2 as _cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    _cv2 = None  # type: ignore[assignment]
+    _CV2_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Zoom detection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ZoomDetectResult:
+    """Result of ``zoom_detect``."""
+    is_zoom_in: bool
+    ratio_clip: float    # face_area / frame_area in clip (0.0 if no face detected)
+    ratio_source: float  # face_area / frame_area in source (0.0 if no face detected)
+    zoom_factor: float   # ratio_clip / ratio_source (1.0 if unknown)
+    method: str          # "face" | "aspect_ratio" | "no_source"
+
+
+def _grab_frame(path: Path, offset_sec: float = 0.0):
+    """
+    Grab a single frame from *path* at *offset_sec* using cv2.VideoCapture.
+
+    Returns the frame as a numpy array (BGR), or None on failure.
+    Requires cv2 to be available.
+    """
+    cap = _cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            logger.warning("zoom_detect: cannot open video %s", path)
+            return None
+        if offset_sec > 0.0:
+            fps = cap.get(_cv2.CAP_PROP_FPS) or 25.0
+            target_frame = int(offset_sec * fps)
+            cap.set(_cv2.CAP_PROP_POS_FRAMES, target_frame)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            logger.warning(
+                "zoom_detect: failed to read frame at %.2fs from %s", offset_sec, path
+            )
+            return None
+        return frame
+    finally:
+        cap.release()
+
+
+def _largest_face_ratio(frame) -> float:
+    """
+    Detect faces in *frame* with Haar cascade and return the ratio of the
+    largest face area to the total frame area.  Returns 0.0 if no face found.
+    """
+    gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+    classifier = _cv2.CascadeClassifier(
+        _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    faces = classifier.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=4,
+        minSize=(30, 30),
+    )
+    if len(faces) == 0:
+        return 0.0
+
+    frame_h, frame_w = frame.shape[:2]
+    frame_area = frame_w * frame_h
+    if frame_area == 0:
+        return 0.0
+
+    largest_area = max(int(w) * int(h) for (_, _, w, h) in faces)
+    return largest_area / frame_area
+
+
+def zoom_detect(
+    clip_path: Path,
+    source_path: Optional[Path],
+    align_offset_sec: float = 0.0,
+    zoom_threshold: float = 1.5,
+) -> ZoomDetectResult:
+    """
+    Determine whether *clip_path* is spatially zoomed-in relative to
+    *source_path* (i.e. the subject/face appears larger in the clip), as
+    opposed to merely being a temporal trim.
+
+    Algorithm
+    ---------
+    1. Grab the first frame of *clip_path* and the frame at *align_offset_sec*
+       from *source_path*.
+    2. Run Haar-cascade face detection on both frames.
+    3. Compute ``face_ratio = largest_face_area / frame_area`` for each.
+    4. If both ratios are non-zero:
+       ``zoom_factor = ratio_clip / ratio_source``
+       ``is_zoom_in  = zoom_factor > zoom_threshold``   (method="face")
+    5. Fallback (any frame has no detectable face):
+       Compare aspect ratios — a significant AR difference (> 0.15) suggests
+       cropping/zooming.  (method="aspect_ratio")
+    6. If *source_path* is None, return ``is_zoom_in=False, method="no_source"``.
+
+    Parameters
+    ----------
+    clip_path        : Path to the Pixeldrain clip file.
+    source_path      : Path to the source video, or None.
+    align_offset_sec : Time offset (seconds) at which to sample the source frame.
+    zoom_threshold   : Minimum ratio_clip/ratio_source to call it a zoom-in.
+
+    Returns
+    -------
+    ZoomDetectResult
+    """
+    if source_path is None:
+        return ZoomDetectResult(
+            is_zoom_in=False,
+            ratio_clip=0.0,
+            ratio_source=0.0,
+            zoom_factor=1.0,
+            method="no_source",
+        )
+
+    # --- Fallback: no cv2 available → use aspect-ratio heuristic only ----------
+    if not _CV2_AVAILABLE:
+        logger.debug("zoom_detect: cv2 not available, falling back to aspect_ratio")
+        return _zoom_detect_ar(clip_path, source_path)
+
+    # --- Grab frames -----------------------------------------------------------
+    frame_clip = _grab_frame(clip_path, offset_sec=0.0)
+    frame_src  = _grab_frame(source_path, offset_sec=align_offset_sec)
+
+    if frame_clip is None or frame_src is None:
+        logger.debug(
+            "zoom_detect: could not grab frames (clip=%s, src=%s), "
+            "falling back to aspect_ratio",
+            frame_clip is None, frame_src is None,
+        )
+        return _zoom_detect_ar(clip_path, source_path)
+
+    # --- Face ratios -----------------------------------------------------------
+    ratio_clip   = _largest_face_ratio(frame_clip)
+    ratio_source = _largest_face_ratio(frame_src)
+
+    if ratio_clip > 0.0 and ratio_source > 0.0:
+        zoom_factor = ratio_clip / ratio_source
+        return ZoomDetectResult(
+            is_zoom_in=zoom_factor > zoom_threshold,
+            ratio_clip=ratio_clip,
+            ratio_source=ratio_source,
+            zoom_factor=zoom_factor,
+            method="face",
+        )
+
+    # --- Fallback: at least one frame had no detected face ---------------------
+    logger.debug(
+        "zoom_detect: face not detected (ratio_clip=%.4f, ratio_source=%.4f), "
+        "falling back to aspect_ratio",
+        ratio_clip, ratio_source,
+    )
+    ar_result = _zoom_detect_ar_from_frames(frame_clip, frame_src)
+    # Preserve the ratios we did manage to compute
+    ar_result.ratio_clip   = ratio_clip
+    ar_result.ratio_source = ratio_source
+    return ar_result
+
+
+def _zoom_detect_ar(clip_path: Path, source_path: Path) -> ZoomDetectResult:
+    """
+    Aspect-ratio fallback when cv2 is unavailable (no frame grabbing).
+    Uses probe_video for width/height.
+    """
+    info_clip = probe_video(clip_path)
+    info_src  = probe_video(source_path)
+
+    clip_ar = _safe_ar(info_clip.get("width", 0), info_clip.get("height", 0))
+    src_ar  = _safe_ar(info_src.get("width",  0), info_src.get("height",  0))
+
+    is_zoom = abs(clip_ar - src_ar) > 0.15 if (clip_ar and src_ar) else False
+    return ZoomDetectResult(
+        is_zoom_in=is_zoom,
+        ratio_clip=0.0,
+        ratio_source=0.0,
+        zoom_factor=1.0,
+        method="aspect_ratio",
+    )
+
+
+def _zoom_detect_ar_from_frames(frame_clip, frame_src) -> ZoomDetectResult:
+    """Aspect-ratio fallback computed directly from grabbed frames."""
+    clip_h, clip_w = frame_clip.shape[:2]
+    src_h,  src_w  = frame_src.shape[:2]
+
+    clip_ar = _safe_ar(clip_w, clip_h)
+    src_ar  = _safe_ar(src_w,  src_h)
+
+    is_zoom = abs(clip_ar - src_ar) > 0.15 if (clip_ar and src_ar) else False
+    return ZoomDetectResult(
+        is_zoom_in=is_zoom,
+        ratio_clip=0.0,
+        ratio_source=0.0,
+        zoom_factor=1.0,
+        method="aspect_ratio",
+    )
+
+
+def _safe_ar(width: int, height: int) -> float:
+    """Return width/height aspect ratio, or 0.0 if either dimension is zero."""
+    return width / height if height > 0 else 0.0

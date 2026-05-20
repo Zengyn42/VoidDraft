@@ -1,9 +1,0 @@
-{
-  "name": "content_retriever",
-  "description": "Rednote/Reddit content retrieval, transcription, and LLM summarisation pipeline.",
-  "graph": {
-    "state_schema": "content_retriever",
-    "entry": "fetch",
-    "exit": "report"
-  }
-}

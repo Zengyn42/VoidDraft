@@ -1,0 +1,10 @@
+{
+  "name": "content_retriever",
+  "description": "Rednote/Reddit content retrieval, transcription, and LLM summarisation pipeline.",
+  "routing_hint": "当需要从小红书或Reddit批量抓取视频、下载、语音转文字、LLM摘要整理内容时使用。适用：内容采集、视频转录、批量摘要生成。",
+  "graph": {
+    "state_schema": "content_retriever",
+    "entry": "fetch",
+    "exit": "report"
+  }
+}
