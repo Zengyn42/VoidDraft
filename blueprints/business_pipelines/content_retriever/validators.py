@@ -303,6 +303,10 @@ def _xhs_download(post_url: str, dest_dir: Path) -> list[Path]:
     print(f"  [xhs] Downloading: {post_url}")
 
     async def _run():
+        import sys as _sys
+        _XHS_DIR = "/home/kingy/Foundation/Tools/XHS-Downloader"
+        if _XHS_DIR not in _sys.path:
+            _sys.path.insert(0, _XHS_DIR)
         from source import XHS
         async with XHS(
             cookie=COOKIE,
@@ -401,6 +405,25 @@ def transcribe(state: dict) -> dict:
         for video_path in video_files:
             audio_path = video_path.with_suffix(".wav")
             transcript_path = video_path.with_suffix(".txt")
+
+            # Skip videos longer than max_video_duration_sec (default 20 min)
+            max_dur = getattr(cfg, "max_video_duration_sec", 1200)
+            if max_dur > 0:
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    dur = float(probe.stdout.strip() or 0)
+                    if dur > max_dur:
+                        print(
+                            f"  [transcribe] {post_id}: video too long "
+                            f"({dur/60:.1f} min > {max_dur/60:.0f} min limit), skipping."
+                        )
+                        continue
+                except Exception:
+                    pass  # if ffprobe fails, proceed anyway
 
             # Skip if transcript already exists
             if transcript_path.exists() and transcript_path.stat().st_size > 0:

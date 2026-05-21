@@ -27,6 +27,7 @@ class PipelineConfig:
     # Retry config for LLM calls
     summarize_max_retries: int = 3              # attempts per transcript before giving up
     summarize_retry_delay: float = 5.0          # base delay in seconds (doubles each retry)
+    max_video_duration_sec: int = 1200          # skip videos longer than this (0 = no limit, default 20 min)
 
     @classmethod
     def from_yaml(cls, path: str) -> "PipelineConfig":
@@ -55,6 +56,7 @@ class PipelineConfig:
             summarize_auto_threshold_chars=int(raw.get("summarize_auto_threshold_chars", 60000)),
             summarize_max_retries=int(raw.get("summarize_max_retries", 3)),
             summarize_retry_delay=float(raw.get("summarize_retry_delay", 5.0)),
+            max_video_duration_sec=int(raw.get("max_video_duration_sec", 1200)),
         )
 
     def to_dict(self) -> dict:
@@ -79,6 +81,7 @@ class PipelineConfig:
             "summarize_auto_threshold_chars": self.summarize_auto_threshold_chars,
             "summarize_max_retries": self.summarize_max_retries,
             "summarize_retry_delay": self.summarize_retry_delay,
+            "max_video_duration_sec": self.max_video_duration_sec,
         }
 
     @classmethod
@@ -104,5 +107,6 @@ class PipelineConfig:
             summarize_auto_threshold_chars=int(d.get("summarize_auto_threshold_chars", 60000)),
             summarize_max_retries=int(d.get("summarize_max_retries", 3)),
             summarize_retry_delay=float(d.get("summarize_retry_delay", 5.0)),
+            max_video_duration_sec=int(d.get("max_video_duration_sec", 1200)),
         )
 

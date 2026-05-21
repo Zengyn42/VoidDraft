@@ -8,7 +8,7 @@ source:
   credentials_file: kknd2024.json   # EdenGateway/rednote/accounts/ 下的账号文件
 
 download_dir: /home/kingy/Foundation/EdenGateway/rednote_downloads
-max_posts: 200
+max_posts: 500
 analyzer: none          # 视频转文字走 transcribe 节点，不用视觉 analyzer
 analyze_model:
 frame_interval: 10
