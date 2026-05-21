@@ -63,6 +63,8 @@ DINOV2_CONF_REF        = 0.50
 POSE_CONF_REF          = 0.55
 # If best confidence after parallel competition is below this, retry at 2x speed
 SLOWMO_RETRY_THRESHOLD = 0.65   # §5.2 参数调优记录
+# Offset deduplication: two clips are "same region" if their offsets are within this gap
+DEDUP_MIN_GAP_SEC      = 2.0    # §5.1 参数调优记录
 
 # §5.2 — Slowmo detection
 SPEED_FACTOR_CANDIDATES = [1.0, 2.0, 4.0]
@@ -789,6 +791,207 @@ def _make_speed_clip(clip_path: Path, factor: float = 2.0) -> Path | None:
     return tmp
 
 
+def _source_duration(source_path: Path) -> float:
+    """Return duration of source video in seconds via ffprobe/ffmpeg."""
+    import shutil as _sh
+    ff = _sh.which("ffprobe") or _sh.which("ffmpeg")
+    if not ff:
+        return 0.0
+    cmd = [ff, "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=noprint_wrappers=1:nokey=1", str(source_path)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _run_dinov2_with_exclusions(
+    source_path: Path,
+    clip_path: Path,
+    excluded_ranges: list[tuple[float, float]],
+    source_duration: float,
+) -> tuple[float, float]:
+    """
+    Run DINOv2 alignment while skipping forbidden time windows in the source.
+
+    Strategy:
+      1. Build list of included segments from source (complement of excluded_ranges).
+      2. Use ffmpeg concat to stitch those segments into a temp file.
+      3. Build a stitched_time → original_time mapping.
+      4. Run dinov2_find_offset on the stitched source.
+      5. Map the returned offset back to original source time.
+    """
+    import shutil as _sh, tempfile as _tmp
+    ffmpeg = _sh.which("ffmpeg")
+    if not ffmpeg or source_duration <= 0:
+        return (0.0, 0.0)
+
+    # Build included segments (gaps between excluded ranges)
+    excluded = sorted(excluded_ranges)
+    segs: list[tuple[float, float]] = []
+    cursor = 0.0
+    for ex_start, ex_end in excluded:
+        if cursor < ex_start:
+            segs.append((cursor, ex_start))
+        cursor = max(cursor, ex_end)
+    if cursor < source_duration:
+        segs.append((cursor, source_duration))
+
+    if not segs:
+        return (0.0, 0.0)
+
+    # Build time mapping: list of (stitched_start, original_start, duration)
+    time_map: list[tuple[float, float, float]] = []
+    stitched_cursor = 0.0
+    for orig_start, orig_end in segs:
+        dur = orig_end - orig_start
+        time_map.append((stitched_cursor, orig_start, dur))
+        stitched_cursor += dur
+
+    tmp_dir = Path(_tmp.mkdtemp())
+    try:
+        # Extract each segment as a temp file
+        seg_files: list[Path] = []
+        for i, (orig_start, orig_end) in enumerate(segs):
+            seg_f = tmp_dir / f"seg_{i}.mp4"
+            subprocess.run(
+                [ffmpeg, "-y", "-ss", str(orig_start), "-to", str(orig_end),
+                 "-i", str(source_path), "-c", "copy", str(seg_f)],
+                capture_output=True,
+            )
+            if seg_f.exists():
+                seg_files.append(seg_f)
+
+        if not seg_files:
+            return (0.0, 0.0)
+
+        # Concat into stitched source
+        concat_list = tmp_dir / "concat.txt"
+        concat_list.write_text(
+            "\n".join(f"file '{f.absolute()}'" for f in seg_files)
+        )
+        stitched = tmp_dir / "stitched.mp4"
+        subprocess.run(
+            [ffmpeg, "-y", "-f", "concat", "-safe", "0",
+             "-i", str(concat_list), "-c", "copy", str(stitched)],
+            capture_output=True,
+        )
+        if not stitched.exists():
+            return (0.0, 0.0)
+
+        # Run DINOv2 on stitched source
+        stitched_offset, conf = _run_dinov2_align(stitched, clip_path)
+
+        # Map stitched offset → original offset
+        orig_offset = stitched_offset
+        for stitch_start, orig_start, dur in time_map:
+            if stitch_start <= stitched_offset < stitch_start + dur:
+                orig_offset = orig_start + (stitched_offset - stitch_start)
+                break
+
+        return (orig_offset, conf)
+
+    except Exception as e:
+        logger.debug("dinov2_with_exclusions failed: %s", e)
+        return (0.0, 0.0)
+    finally:
+        import shutil as _sh2
+        _sh2.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _deduplicate_alignments(
+    clip_recs: list[dict],
+    post_alignments: list[AlignRecord],
+    source_path: Path,
+) -> list[AlignRecord]:
+    """
+    Greedy dedup: highest-confidence clip claims its source window first.
+    Subsequent clips whose best offset falls within an already-claimed window
+    are re-aligned on the remaining (unclaimed) source regions.
+    """
+    if len(post_alignments) <= 1:
+        return post_alignments
+
+    src_dur = _source_duration(source_path)
+    dur_by_clip = {r["clip_id"]: r["duration_sec"] for r in clip_recs}
+
+    # Sort by confidence desc (unmatched last)
+    ordered = sorted(
+        post_alignments,
+        key=lambda a: (a.method != "unmatched", a.confidence),
+        reverse=True,
+    )
+
+    claimed: list[tuple[float, float]] = []   # (start, end) in source time
+    result: list[AlignRecord] = []
+
+    for ar in ordered:
+        if ar.method == "unmatched":
+            result.append(ar)
+            continue
+
+        clip_dur = dur_by_clip.get(ar.clip_id, 5.0)
+        win_start = ar.offset_sec
+        win_end   = ar.offset_sec + clip_dur
+
+        # Check overlap with any claimed window
+        overlap = any(
+            not (win_end <= cs or win_start >= ce)
+            for cs, ce in claimed
+        )
+
+        if not overlap:
+            claimed.append((win_start, win_end))
+            result.append(ar)
+        else:
+            # Re-align excluding all claimed windows
+            logger.info(
+                "dedup: %s offset=%.2fs conflicts claimed windows — re-aligning with exclusions",
+                ar.clip_id, ar.offset_sec,
+            )
+            new_offset, new_conf = _run_dinov2_with_exclusions(
+                source_path=source_path,
+                clip_path=Path(next(
+                    r["local_path"] for r in clip_recs if r["clip_id"] == ar.clip_id
+                )),
+                excluded_ranges=claimed,
+                source_duration=src_dur,
+            )
+            if new_conf >= ALIGN_MIN_ACCEPT:
+                new_win = (new_offset, new_offset + clip_dur)
+                claimed.append(new_win)
+                logger.info(
+                    "dedup: %s → new offset=%.2fs conf=%.3f",
+                    ar.clip_id, new_offset, new_conf,
+                )
+                result.append(AlignRecord(
+                    clip_id=ar.clip_id,
+                    source_clip_id=ar.source_clip_id,
+                    offset_sec=new_offset,
+                    confidence=new_conf,
+                    method="dinov2_dedup",
+                    error="",
+                    audio_conf=ar.audio_conf,
+                    dinov2_conf=new_conf,
+                    pose_conf=ar.pose_conf,
+                ))
+            else:
+                result.append(AlignRecord(
+                    clip_id=ar.clip_id,
+                    source_clip_id=ar.source_clip_id,
+                    offset_sec=0.0,
+                    confidence=0.0,
+                    method="unmatched",
+                    error="dedup: no non-overlapping region found",
+                    audio_conf=ar.audio_conf,
+                    dinov2_conf=ar.dinov2_conf,
+                    pose_conf=ar.pose_conf,
+                ))
+
+    return result
+
+
 def _run_pose_align(source_path: Path, clip_path: Path) -> tuple[float, float]:
     """Run YOLO pose motion alignment. Returns (offset_sec, confidence)."""
     try:
@@ -849,13 +1052,14 @@ def align(state: dict) -> dict:
 
         # Pick best source by pixel count (not file size)
         best_source = max(source_recs, key=lambda r: r["width"] * r["height"])
+        post_alignments: list[AlignRecord] = []  # collect per-post, dedup after
 
         for cr in clip_recs:
             clip_path   = Path(cr["local_path"])
             source_path = Path(best_source["local_path"])
 
             if not clip_path.exists() or not source_path.exists():
-                alignments.append(AlignRecord(
+                post_alignments.append(AlignRecord(
                     clip_id=cr["clip_id"],
                     source_clip_id=best_source["clip_id"],
                     offset_sec=0.0, confidence=0.0,
@@ -947,7 +1151,7 @@ def align(state: dict) -> dict:
             else:
                 error_msg = ""
 
-            alignments.append(AlignRecord(
+            post_alignments.append(AlignRecord(
                 clip_id=cr["clip_id"],
                 source_clip_id=best_source["clip_id"],
                 offset_sec=best_offset,
@@ -965,6 +1169,10 @@ def align(state: dict) -> dict:
                 cr["clip_id"], best_method, best_offset, best_conf,
                 audio_result[1], dinov2_result[1], pose_result[1],
             )
+
+        # ── Dedup: resolve clips that mapped to the same source window ───────
+        deduped = _deduplicate_alignments(clip_recs, post_alignments, source_path)
+        alignments.extend(deduped)
 
     return {
         "alignments": json.dumps([asdict(a) for a in alignments]),
