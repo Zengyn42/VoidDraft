@@ -932,8 +932,13 @@ def _deduplicate_alignments(
             continue
 
         clip_dur = dur_by_clip.get(ar.clip_id, 5.0)
+        # Source window = clip_dur / speed_factor
+        # "dinov2_2x" means clip was sped up 2x to align → original clip is 2x slower
+        # → it covers clip_dur/2 of source footage
+        speed_factor = 2.0 if ar.method == "dinov2_2x" else 1.0
+        source_coverage = clip_dur / speed_factor
         win_start = ar.offset_sec
-        win_end   = ar.offset_sec + clip_dur
+        win_end   = ar.offset_sec + source_coverage
 
         # Check overlap with any claimed window
         overlap = any(
@@ -947,8 +952,8 @@ def _deduplicate_alignments(
         else:
             # Re-align excluding all claimed windows
             logger.info(
-                "dedup: %s offset=%.2fs conflicts claimed windows — re-aligning with exclusions",
-                ar.clip_id, ar.offset_sec,
+                "dedup: %s offset=%.2fs (source_win=%.2f-%.2fs) conflicts claimed — re-aligning",
+                ar.clip_id, ar.offset_sec, win_start, win_end,
             )
             new_offset, new_conf = _run_dinov2_with_exclusions(
                 source_path=source_path,
@@ -959,7 +964,7 @@ def _deduplicate_alignments(
                 source_duration=src_dur,
             )
             if new_conf >= ALIGN_MIN_ACCEPT:
-                new_win = (new_offset, new_offset + clip_dur)
+                new_win = (new_offset, new_offset + source_coverage)
                 claimed.append(new_win)
                 logger.info(
                     "dedup: %s → new offset=%.2fs conf=%.3f",
