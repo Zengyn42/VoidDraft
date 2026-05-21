@@ -61,6 +61,8 @@ ALIGN_MIN_ACCEPT       = 0.10   # below this → unmatched
 AUDIO_CONF_REF         = 0.10   # reference baseline (logged, not gating)
 DINOV2_CONF_REF        = 0.50
 POSE_CONF_REF          = 0.55
+# If best confidence after parallel competition is below this, retry at 2x speed
+SLOWMO_RETRY_THRESHOLD = 0.65   # §5.2 参数调优记录
 
 # §5.2 — Slowmo detection
 SPEED_FACTOR_CANDIDATES = [1.0, 2.0, 4.0]
@@ -766,6 +768,27 @@ def _run_dinov2_align(source_path: Path, clip_path: Path) -> tuple[float, float]
         return (0.0, 0.0)
 
 
+def _make_speed_clip(clip_path: Path, factor: float = 2.0) -> Path | None:
+    """
+    Return a temp copy of clip_path sped up by `factor` using ffmpeg setpts.
+    Caller is responsible for deleting the returned file.
+    Returns None if ffmpeg is unavailable or the operation fails.
+    """
+    import tempfile, shutil as _shutil
+    ffmpeg = _shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    tmp = Path(tempfile.mktemp(suffix=f"_fast{factor:.0f}x.mp4"))
+    pts = f"{1.0 / factor:.6f}*PTS"
+    result = subprocess.run(
+        [ffmpeg, "-y", "-i", str(clip_path), "-vf", f"setpts={pts}", "-an", str(tmp)],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not tmp.exists():
+        return None
+    return tmp
+
+
 def _run_pose_align(source_path: Path, clip_path: Path) -> tuple[float, float]:
     """Run YOLO pose motion alignment. Returns (offset_sec, confidence)."""
     try:
@@ -884,6 +907,33 @@ def align(state: dict) -> dict:
             # Sort by confidence descending
             candidates.sort(key=lambda x: x[2], reverse=True)
             best_method, best_offset, best_conf = candidates[0]
+
+            # ── Slowmo retry: if best conf is low, try 2x speed DINOv2 ──────
+            # Don't rely on slowmo_detect (FPS/BPM detection unreliable for
+            # clips without audio or with frame-duplication slowmo).
+            # If the 1x alignment is weak, speed up the clip 2x with ffmpeg
+            # and re-run DINOv2. Keep whichever is better.
+            if ALIGN_MIN_ACCEPT <= best_conf < SLOWMO_RETRY_THRESHOLD:
+                fast_clip = _make_speed_clip(clip_path, factor=2.0)
+                if fast_clip:
+                    try:
+                        r2x_offset, r2x_conf = _run_dinov2_align(source_path, fast_clip)
+                        logger.info(
+                            "slowmo-retry 2x: %s  conf %.3f → %.3f",
+                            cr["clip_id"], best_conf, r2x_conf,
+                        )
+                        if r2x_conf > best_conf:
+                            best_method = "dinov2_2x"
+                            best_offset = r2x_offset
+                            best_conf   = r2x_conf
+                            dinov2_result = (r2x_offset, r2x_conf)
+                    except Exception as e:
+                        logger.debug("slowmo-retry failed: %s", e)
+                    finally:
+                        try:
+                            fast_clip.unlink(missing_ok=True)
+                        except Exception:
+                            pass
 
             if best_conf < ALIGN_MIN_ACCEPT:
                 best_method = "unmatched"
