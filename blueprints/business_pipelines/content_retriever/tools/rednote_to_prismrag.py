@@ -134,7 +134,7 @@ def _make_know_md(know_id: str, key_point: str, content: str, summary_data: dict
 
 def run(dry_run: bool = False, limit: int | None = None, skip_graph: bool = False) -> None:
     from prism_rag.store.registry import Registry
-    from prism_rag.store.graph import KnowledgeGraph, Node
+    from prism_rag.store.graph import KnowledgeGraph, Node, Edge
 
     print(f"[rednote→prismrag] Loading summaries from {_DOWNLOADS_DIR}")
     summaries = _load_summaries(limit)
@@ -173,10 +173,17 @@ def run(dry_run: bool = False, limit: int | None = None, skip_graph: bool = Fals
         kg = None
         existing_ids = set()
 
-    # Process each key_point
+    # Process each key_point — build nodes and track groupings for edges
     nodes_added = 0
     md_written  = 0
     skipped     = 0
+
+    # post_id → [know_id, ...]  for SIBLING edges
+    post_to_ids:  dict[str, list[str]] = {}
+    # topic   → [know_id, ...]  for RELATED edges (capped per topic)
+    topic_to_ids: dict[str, list[str]] = {}
+    # track new know_ids actually added (for edge building)
+    new_ids: list[str] = []
 
     for (summary_data, key_point), know_id in zip(all_pairs, know_ids):
         # Skip if already in graph
@@ -190,7 +197,6 @@ def run(dry_run: bool = False, limit: int | None = None, skip_graph: bool = Fals
         # Write .know.md alongside summary file
         summary_file = Path(summary_data.get("_summary_file", ""))
         if summary_file.exists():
-            # Derive a stable filename from know_id
             know_md_path = summary_file.parent / f"{know_id}.know.md"
             if not dry_run:
                 know_md_path.write_text(md_text, encoding="utf-8")
@@ -226,15 +232,77 @@ def run(dry_run: bool = False, limit: int | None = None, skip_graph: bool = Fals
             )
             kg.add_node(node)
             nodes_added += 1
+            new_ids.append(know_id)
+
+            # Track groupings for edge building
+            pid = summary_data.get("post_id", "")
+            if pid:
+                post_to_ids.setdefault(pid, []).append(know_id)
+
+            topic = summary_data.get("topic", "").strip()
+            if topic:
+                topic_to_ids.setdefault(topic, []).append(know_id)
+
+    # ── Build edges ────────────────────────────────────────────────────────────
+    edges_added = 0
+    if kg is not None and new_ids:
+        print(f"[rednote→prismrag] Building edges…")
+
+        # 1. SIBLING edges — all key_points from the same post form a clique
+        for pid, ids in post_to_ids.items():
+            for i in range(len(ids)):
+                for j in range(i + 1, len(ids)):
+                    e = Edge(
+                        source=ids[i], target=ids[j],
+                        relation="SIBLING",
+                        confidence="EXTRACTED",
+                        confidence_score=1.0,
+                        weight=1.0,
+                        source_pass="ast",
+                        lifecycle_class="deterministic",
+                    )
+                    kg.add_edge(e)
+                    edges_added += 1
+
+        # 2. RELATED edges — connect posts within the same topic
+        #    To avoid O(n²) explosion, only connect sequential pairs per topic
+        #    (chain pattern: A→B→C→D) rather than a full clique.
+        for topic, ids in topic_to_ids.items():
+            # Deduplicate by post: one representative node per post per topic
+            seen_posts: dict[str, str] = {}
+            for kid in ids:
+                attrs = kg.g.nodes[kid]
+                pid = attrs.get("frontmatter", {}).get("post_id", kid)
+                if pid not in seen_posts:
+                    seen_posts[pid] = kid
+            reps = list(seen_posts.values())
+            # Chain: rep[0]→rep[1], rep[1]→rep[2], …
+            for i in range(len(reps) - 1):
+                e = Edge(
+                    source=reps[i], target=reps[i + 1],
+                    relation="RELATED",
+                    confidence="EXTRACTED",
+                    confidence_score=0.8,
+                    weight=0.8,
+                    source_pass="ast",
+                    lifecycle_class="probabilistic",
+                )
+                kg.add_edge(e)
+                edges_added += 1
+
+        print(f"[rednote→prismrag] Edges added: {edges_added} "
+              f"(SIBLING from {len(post_to_ids)} posts, "
+              f"RELATED across {len(topic_to_ids)} topics)")
 
     # Save graph
-    if kg is not None and nodes_added > 0:
-        print(f"[rednote→prismrag] Saving graph with {nodes_added} new nodes…")
+    if kg is not None and (nodes_added > 0 or edges_added > 0):
+        print(f"[rednote→prismrag] Saving graph…")
         kg.save(_GRAPH_PATH)
         print(f"[rednote→prismrag] Graph saved: {_GRAPH_PATH}")
 
     print(f"\n[rednote→prismrag] ── Done ──────────────────────")
     print(f"  KNOW nodes added : {nodes_added}")
+    print(f"  Edges added      : {edges_added}")
     print(f"  .know.md written : {md_written}")
     print(f"  Skipped (exist)  : {skipped}")
     if dry_run:

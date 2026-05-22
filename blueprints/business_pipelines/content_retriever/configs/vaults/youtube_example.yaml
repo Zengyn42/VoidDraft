@@ -1,0 +1,11 @@
+# YouTube vault builder config (example template)
+# Usage: python3 vault_builder.py --config configs/vaults/youtube_example.yaml
+
+summaries_glob: "/home/kingy/Foundation/EdenGateway/youtube_downloads/**/*.summary.json"
+vault_root:     "/home/kingy/Foundation/EdenGateway/youtube"
+namespace:      "youtube"
+display_name:   "YouTube知识图谱"
+url_template:   "https://www.youtube.com/watch?v={post_id}"
+
+# topic_map: {} means no normalization (topics passed through as-is)
+topic_map: {}
