@@ -59,21 +59,27 @@ def test_setup_creates_directories():
 
 def test_reset_for_coder_clears_qa_messages():
     from functional_graphs.apex_coder.validators import reset_for_coder
-    result = reset_for_coder({
-        "messages": [
-            HumanMessage(content="user task", id="h1"),
-            AIMessage(content="QA reasoning blah blah", id="a1"),
-        ],
-        "user_requirements": "user task",
-        "working_directory": "/tmp/test_reset",
-        "qa_bypass": False,
-        "run_qa_script": "/tmp/test_reset/test_tool/run_qa.sh",
-    })
+    with tempfile.TemporaryDirectory() as wd:
+        script = Path(wd, "test_tool", "run_qa.sh")
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/bash\nexit 0\n")
+        result = reset_for_coder({
+            "messages": [
+                HumanMessage(content="user task", id="h1"),
+                AIMessage(content="QA reasoning blah blah", id="a1"),
+            ],
+            "user_requirements": "user task",
+            "working_directory": wd,
+            "qa_summary": "wrote 5 tests + runner",
+        })
     msgs = result["messages"]
     human_msgs = [m for m in msgs if isinstance(m, HumanMessage)]
     assert len(human_msgs) == 1
     assert "user task" in human_msgs[0].content
     assert "run_qa.sh" in human_msgs[0].content
+    # Bugfix 2026-06-11: reset_for_coder must write parsed QA fields to state
+    assert result["qa_bypass"] is False
+    assert result["run_qa_script"] == str(script)
 
 
 def test_reset_for_coder_bypass_mode():
@@ -81,12 +87,58 @@ def test_reset_for_coder_bypass_mode():
     result = reset_for_coder({
         "messages": [HumanMessage(content="task", id="h1")],
         "user_requirements": "simple task",
-        "working_directory": "/tmp/test_bypass",
-        "qa_bypass": True,
-        "run_qa_script": "",
+        "working_directory": "/tmp/test_bypass_nonexistent",
+        "qa_summary": "QA_BYPASS: 纯文档改动，无可测行为",
     })
     human_msgs = [m for m in result["messages"] if isinstance(m, HumanMessage)]
     assert "BYPASSED" in human_msgs[0].content
+    assert result["qa_bypass"] is True
+    assert result["run_qa_script"] == ""
+
+
+# --- parse_qa_output (bugfix 2026-06-11: QA output was never parsed into state,
+#     so executor always saw run_qa_script="" → guaranteed FAIL → retry storm) ---
+
+def test_parse_qa_output_bypass_marker():
+    from functional_graphs.apex_coder.validators import parse_qa_output
+    out = parse_qa_output({
+        "qa_summary": "分析完成。\nQA_BYPASS: 纯重构无行为变化",
+        "working_directory": "/tmp/nonexistent_apex",
+    })
+    assert out == {"qa_bypass": True, "run_qa_script": ""}
+
+
+def test_parse_qa_output_bypass_marker_fullwidth_colon():
+    from functional_graphs.apex_coder.validators import parse_qa_output
+    out = parse_qa_output({
+        "qa_summary": "QA_BYPASS： 配置改动",
+        "working_directory": "/tmp/nonexistent_apex",
+    })
+    assert out["qa_bypass"] is True
+
+
+def test_parse_qa_output_runner_script_found():
+    from functional_graphs.apex_coder.validators import parse_qa_output
+    with tempfile.TemporaryDirectory() as wd:
+        script = Path(wd, "test_tool", "run_qa.sh")
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/bash\nexit 0\n")
+        out = parse_qa_output({
+            "qa_summary": "wrote tests and runner",
+            "working_directory": wd,
+        })
+    assert out == {"qa_bypass": False, "run_qa_script": str(script)}
+
+
+def test_parse_qa_output_contract_violation_defaults_to_bypass():
+    """QA neither bypassed nor wrote run_qa.sh → must NOT cause a guaranteed-FAIL
+    retry loop; defaults to bypass with a warning."""
+    from functional_graphs.apex_coder.validators import parse_qa_output
+    out = parse_qa_output({
+        "qa_summary": "did some analysis but forgot the runner",
+        "working_directory": "/tmp/nonexistent_apex",
+    })
+    assert out == {"qa_bypass": True, "run_qa_script": ""}
 
 
 import subprocess

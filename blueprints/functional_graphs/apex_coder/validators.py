@@ -74,13 +74,49 @@ def setup(state: dict) -> dict:
 splitter = setup
 
 
+def parse_qa_output(state: dict) -> dict:
+    """Parse claude_qa output (qa_summary) into qa_bypass / run_qa_script.
+
+    Bugfix 2026-06-11: qa_bypass / run_qa_script were declared in state.py but
+    NEVER written anywhere — executor always saw run_qa_script="" → guaranteed
+    FAIL → retry loop burned to RETRY_CAP on every task. This parse step
+    restores the QA_ROLE.md contract:
+      - QA outputs "QA_BYPASS: <reason>"            → qa_bypass=True
+      - QA writes <working_dir>/test_tool/run_qa.sh → run_qa_script=<path>
+      - neither (QA contract violation)             → default to bypass + warn,
+        otherwise executor would fail deterministically with zero chance of
+        recovery (the original bug's failure mode).
+    """
+    qa_summary = state.get("qa_summary", "") or ""
+    working_dir = state.get("working_directory", "")
+
+    if re.search(r"QA_BYPASS\s*[:：]", qa_summary):
+        logger.info("[parse_qa_output] QA_BYPASS marker found → qa_bypass=True")
+        return {"qa_bypass": True, "run_qa_script": ""}
+
+    script = os.path.join(working_dir, "test_tool", "run_qa.sh")
+    if os.path.isfile(script):
+        logger.info(f"[parse_qa_output] runner found: {script}")
+        return {"qa_bypass": False, "run_qa_script": script}
+
+    logger.warning(
+        "[parse_qa_output] QA neither output QA_BYPASS nor wrote run_qa.sh "
+        f"(expected {script}) — defaulting to bypass to avoid guaranteed-FAIL "
+        f"retry loop. qa_summary head: {qa_summary[:200]!r}"
+    )
+    return {"qa_bypass": True, "run_qa_script": ""}
+
+
 def reset_for_coder(state: dict) -> dict:
     from langchain_core.messages import HumanMessage, RemoveMessage
 
+    # Parse QA output into state fields (see parse_qa_output docstring)
+    qa_fields = parse_qa_output(state)
+
     user_req = state.get("user_requirements", "")
     working_dir = state.get("working_directory", "")
-    qa_bypass = state.get("qa_bypass", False)
-    run_qa_script = state.get("run_qa_script", "")
+    qa_bypass = qa_fields["qa_bypass"]
+    run_qa_script = qa_fields["run_qa_script"]
 
     msgs = state.get("messages", [])
     removals = [RemoveMessage(id=m.id) for m in msgs]
@@ -108,6 +144,7 @@ def reset_for_coder(state: dict) -> dict:
     prompt = "\n".join(lines)
     return {
         "messages": removals + [HumanMessage(content=prompt)],
+        **qa_fields,
     }
 
 
