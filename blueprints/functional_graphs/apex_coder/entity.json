@@ -15,7 +15,6 @@
         "type": "CLAUDE_SDK",
         "model": "claude-sonnet-4-6",
         "session_key": "apex_qa",
-        "inherit_from": "claude_main",
         "tools": ["Read", "Write", "Bash"],
         "permission_mode": "bypassPermissions",
         "persona_files": ["./QA_ROLE.md", "./PROTOCOL.md"],

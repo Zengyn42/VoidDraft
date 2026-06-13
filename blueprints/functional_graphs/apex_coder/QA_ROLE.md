@@ -32,10 +32,23 @@ cd "$(dirname "$0")/.."
 timeout 120 python3 -m pytest test_tool/qa_tests/ -v 2>&1
 ```
 
-## 输出格式
+## 输出格式（强制，违反即为合约违规）
 
-如果写了测试：
-  QA_READY: <测试数量> tests written to <path>
+你的最终输出必须且只能是以下两种形式之一：
 
-如果跳过：
-  QA_BYPASS: <原因>
+**情况 A — 写了测试：**
+```
+QA_READY: <测试数量> tests written to <path>
+```
+且 `<working_directory>/test_tool/run_qa.sh` 必须已存在可执行。
+
+**情况 B — 跳过测试：**
+```
+QA_BYPASS: <具体原因>
+```
+
+❌ 禁止：输出纯文字审查报告而不包含上述任一标记。
+❌ 禁止：说"已验证"、"全部通过"、"看起来没问题"但不写 run_qa.sh。
+❌ 禁止：假设实现已完成——你在 Coder 写代码之前运行，代码可能还不存在。
+
+你的职责是：**根据需求写测试**，不是审查已有代码。
