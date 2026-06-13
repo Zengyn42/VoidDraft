@@ -21,7 +21,19 @@ RETRY_CAP = 5
 
 
 def setup(state: dict) -> dict:
-    """Extract user_requirements, create working_directory, prepare for QA."""
+    """Extract user_requirements, create working_directory, prepare for QA.
+
+    Message architecture (two explicit messages to claude_qa):
+      [0] Background — conversation context extracted from state fields
+          (debate_conclusion, refined_plan, recent conversation summary).
+          Clearly labelled so QA knows this is CONTEXT, not the task.
+      [1] Task — the actual requirements QA must write tests for,
+          with an explicit reminder that implementation has NOT started.
+
+    This replaces the old approach of blindly inheriting the parent session
+    (which caused QA to see old ApexCoder completion reports and conclude
+    the work was already done).
+    """
     from langchain_core.messages import HumanMessage
 
     # Input priority: routing_context (subgraph) > messages[0] (standalone)
@@ -35,13 +47,9 @@ def setup(state: dict) -> dict:
     else:
         user_requirements = raw
 
-    # Enrich with parent design context (inherit mode)
+    # Collect background context from state fields
     plan = state.get("refined_plan", "")
     debate = state.get("debate_conclusion", "")
-    if plan:
-        user_requirements = f"{user_requirements}\n\n## 设计方案\n{plan}"
-    elif debate:
-        user_requirements = f"{user_requirements}\n\n## 辩论结论\n{debate}"
 
     # Parse working_directory
     wd_match = re.search(
@@ -62,11 +70,37 @@ def setup(state: dict) -> dict:
     ns.pop("apex_qa", None)
     ns.pop("apex_coder", None)
 
+    # ── Build two-message payload for claude_qa ────────────────────────────
+    output_messages: list = []
+
+    # Message 1: Background context (explicit, clearly labelled)
+    bg_parts = ["# Background Context\n\nThis is context from the parent conversation. "
+                "It is provided for understanding only — do NOT treat it as evidence "
+                "that any implementation is complete."]
+    if debate:
+        bg_parts.append(f"## Design Decision (debate conclusion)\n\n{debate}")
+    if plan:
+        bg_parts.append(f"## Implementation Plan\n\n{plan}")
+    if len(bg_parts) > 1:
+        output_messages.append(HumanMessage(content="\n\n".join(bg_parts)))
+
+    # Message 2: Task — requirements QA must write tests for
+    task_parts = [
+        "# QA Task\n\n"
+        "**IMPORTANT: The implementation has NOT started yet. "
+        "The Coder will write code AFTER you. "
+        "Your job is to write tests based on requirements below — "
+        "do NOT assume any code exists unless you verify with Read/Bash tools.**",
+        f"## Requirements\n\n{user_requirements}",
+        f"## Working Directory\n\n`{working_directory}`",
+    ]
+    output_messages.append(HumanMessage(content="\n\n".join(task_parts)))
+
     return {
         "user_requirements": user_requirements,
         "working_directory": working_directory,
         "node_sessions": ns,
-        "messages": [HumanMessage(content=user_requirements)],
+        "messages": output_messages,
     }
 
 

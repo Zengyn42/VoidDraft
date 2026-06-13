@@ -27,8 +27,11 @@ def test_setup_text_input():
     })
     assert result["user_requirements"] == "Build a snake game\n\n## 工作目录: /tmp/test_splitter_apex"
     assert result["working_directory"] == "/tmp/test_splitter_apex"
+    # No background context → only 1 task message
     assert len(result["messages"]) == 1
-    assert result["messages"][0].content == result["user_requirements"]
+    # Task message contains the requirements
+    assert "Build a snake game" in result["messages"][0].content
+    assert "QA Task" in result["messages"][0].content
 
 
 def test_setup_file_input():
@@ -295,8 +298,14 @@ def test_setup_reads_refined_plan():
         "refined_plan": "Use MVC pattern with curses UI",
         "node_sessions": {"claude_main": "uuid-A", "apex_qa": "old-uuid"},
     })
-    assert "MVC pattern" in result["user_requirements"]
-    assert "设计方案" in result["user_requirements"]
+    # user_requirements stays clean (just the raw task)
+    assert result["user_requirements"] == "Build a game"
+    # refined_plan appears in the background context message (message[0])
+    all_content = " ".join(m.content for m in result["messages"])
+    assert "MVC pattern" in all_content
+    assert "Implementation Plan" in all_content
+    # Two messages: background + task
+    assert len(result["messages"]) == 2
     # Should clear subgraph session keys
     assert "apex_qa" not in result["node_sessions"]
     assert "claude_main" in result["node_sessions"]
@@ -309,8 +318,13 @@ def test_setup_reads_debate_conclusion():
         "debate_conclusion": "Use event-driven architecture",
         "node_sessions": {"claude_main": "uuid-A", "apex_coder": "old-uuid"},
     })
-    assert "event-driven" in result["user_requirements"]
-    assert "辩论结论" in result["user_requirements"]
+    # user_requirements stays clean
+    assert result["user_requirements"] == "Build a game"
+    # debate_conclusion appears in background message
+    all_content = " ".join(m.content for m in result["messages"])
+    assert "event-driven" in all_content
+    assert "Design Decision" in all_content
+    assert len(result["messages"]) == 2
     assert "apex_coder" not in result["node_sessions"]
 
 
