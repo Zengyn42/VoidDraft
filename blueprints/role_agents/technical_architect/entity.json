@@ -16,7 +16,7 @@
         "id": "claude_main",
         "type": "CLAUDE_SDK",
         "extra_persona": true,
-        "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
+        "persona_files": ["./ROLE.md", "./PROTOCOL.md", "./skills/tailscale-funnel.md"],
         "tools": [
           "Read",
           "Write",
