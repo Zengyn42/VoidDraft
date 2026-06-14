@@ -70,6 +70,27 @@ def _extract_note_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parse_notes(notes: list[dict], collected: dict[str, dict]) -> None:
+    """Parse note dicts from API response into collected dict (in-place)."""
+    for note in notes:
+        note_id = note.get("note_id", "")
+        if not note_id or note_id in collected:
+            continue
+        xsec = note.get("xsec_token", "")
+        title = note.get("display_title", "") or note_id
+        note_type = str(note.get("type", "")).lower()
+        xhs_url = (
+            f"{_XHS_BASE}/explore/{note_id}"
+            + (f"?xsec_token={xsec}" if xsec else "")
+        )
+        collected[note_id] = {
+            "id": note_id,
+            "title": title[:80],
+            "url": xhs_url,
+            "type": note_type,
+        }
+
+
 class RedNoteSource(PlatformSource):
     """
     小红书 content source using Playwright (no persistent Chrome profile needed).
@@ -122,13 +143,113 @@ class RedNoteSource(PlatformSource):
         raise ValueError(f"RedNoteSource: invalid mode={self.mode!r} or missing params")
 
     # ------------------------------------------------------------------
-    # Favorites mode: intercept note/collect/page API responses
+    # Favorites mode: DOM scroll + API interception (dual-track)
     # ------------------------------------------------------------------
     async def _collect_favorites_async(self, index_url: str, max_posts: int) -> list[dict]:
         """
-        Navigate to ?tab=fav&subTab=note, intercept note/collect/page API responses.
-        Scroll to trigger pagination. Returns list of post info dicts with xsec_token.
+        DOM scroll mode for favorites — scrolls the actual page to trigger
+        XHS frontend lazy-loading, bypassing the ~270 API cursor limit.
+        Also intercepts note/collect/page responses as a secondary data source.
         """
+        from playwright.async_api import async_playwright
+
+        collected: dict[str, dict] = {}
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                executable_path=_CHROME_BIN,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = await browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                service_workers="block",
+            )
+            page = await ctx.new_page()
+            await ctx.add_cookies(self._cookies)
+
+            # Also intercept API responses to get xsec_token + type
+            async def on_response(resp):
+                if "note/collect/page" not in resp.url:
+                    return
+                try:
+                    body = await resp.json()
+                    data = body.get("data", {})
+                    notes = data.get("notes", [])
+                    has_more = data.get("has_more", False)
+                    _parse_notes(notes, collected)
+                    print(f"[rednote][api] intercept: {len(notes)} notes, "
+                          f"has_more={has_more}, total={len(collected)}")
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            print(f"[rednote] Loading favorites (DOM scroll mode): {index_url}")
+            try:
+                await page.goto(index_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"[rednote] Page load warning: {e}")
+            await asyncio.sleep(8)
+            print(f"[rednote] Page title: {await page.title()}")
+
+            no_change = 0
+            for i in range(self.max_scroll):
+                if len(collected) >= max_posts:
+                    break
+                prev = len(collected)
+
+                # Scroll to bottom first, then wait for API + DOM to update
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(3)
+
+                # ── DOM extraction: scrape note links from rendered cards ──
+                dom_ids = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        // Method 1: anchor tags with xsec_token
+                        document.querySelectorAll('a[href*="xsec_token"]').forEach(a => {
+                            const m = a.href.match(/explore\\/([0-9a-f]{24})/);
+                            const t = a.href.match(/xsec_token=([^&]+)/);
+                            if (m) results.push({id: m[1], xsec: t ? t[1] : '', type: 'unknown'});
+                        });
+                        // Method 2: note card data attributes
+                        document.querySelectorAll('[data-id],[data-note-id]').forEach(el => {
+                            const id = el.dataset.id || el.dataset.noteId || '';
+                            if (id && id.match(/^[0-9a-f]{24}$/))
+                                results.push({id, xsec: '', type: 'unknown'});
+                        });
+                        return results;
+                    }
+                """)
+                for item in dom_ids:
+                    nid = item.get("id", "")
+                    if not nid or nid in collected:
+                        continue
+                    xsec = item.get("xsec", "")
+                    xhs_url = (f"{_XHS_BASE}/explore/{nid}"
+                               + (f"?xsec_token={xsec}" if xsec else ""))
+                    collected[nid] = {"id": nid, "title": nid,
+                                      "url": xhs_url, "type": "unknown"}
+
+                gained = len(collected) - prev
+                print(f"[rednote] Scroll {i+1}/{self.max_scroll} — "
+                      f"{len(collected)} posts (+{gained} new)")
+                no_change = 0 if gained > 0 else no_change + 1
+                if no_change >= 5:
+                    print("[rednote] No new posts after 5 scrolls, stopping")
+                    break
+
+            await ctx.close()
+            await browser.close()
+
+        print(f"[rednote] DOM scroll collected {len(collected)} post links total")
+        return list(collected.values())[:max_posts]
+
+    async def _collect_favorites_scroll_fallback(
+        self, index_url: str, max_posts: int
+    ) -> list[dict]:
+        """Legacy scroll-based fallback (caps at ~270 due to browser JS limit)."""
         from playwright.async_api import async_playwright
 
         collected: dict[str, dict] = {}
@@ -147,7 +268,6 @@ class RedNoteSource(PlatformSource):
             page = await ctx.new_page()
             await ctx.add_cookies(self._cookies)
 
-            # Capture note/collect/page API responses
             async def on_response(resp):
                 nonlocal has_more
                 if "note/collect/page" not in resp.url:
@@ -158,38 +278,19 @@ class RedNoteSource(PlatformSource):
                     notes = data.get("notes", [])
                     has_more = data.get("has_more", False)
                     print(f"[rednote][api] collect/page: {len(notes)} notes, has_more={has_more}")
-                    for note in notes:
-                        note_id = note.get("note_id", "")
-                        if not note_id or note_id in collected:
-                            continue
-                        xsec = note.get("xsec_token", "")
-                        title = note.get("display_title", "") or note_id
-                        note_type = str(note.get("type", "")).lower()
-                        xhs_url = (
-                            f"{_XHS_BASE}/explore/{note_id}"
-                            + (f"?xsec_token={xsec}" if xsec else "")
-                        )
-                        collected[note_id] = {
-                            "id": note_id,
-                            "title": title[:80],
-                            "url": xhs_url,
-                            "type": note_type,
-                        }
+                    _parse_notes(notes, collected)
                 except Exception as e:
                     print(f"[rednote][api] parse error: {e}")
 
             page.on("response", on_response)
-
             print(f"[rednote] Loading favorites: {index_url}")
             try:
                 await page.goto(index_url, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 print(f"[rednote] Page load warning: {e}")
-            await asyncio.sleep(8)  # Wait for initial API call
-
+            await asyncio.sleep(8)
             print(f"[rednote] Page title: {await page.title()}")
 
-            # Scroll to trigger pagination
             no_change = 0
             for i in range(self.max_scroll):
                 if len(collected) >= max_posts or not has_more:

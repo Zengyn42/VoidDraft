@@ -362,12 +362,6 @@ def transcribe(state: dict) -> dict:
         print("[transcribe] Skipping (transcribe=false in config).")
         return {"transcripts": [], "errors": errors}
 
-    try:
-        import whisperx
-    except ImportError:
-        errors.append("[transcribe] whisperx not installed. Run: pip install whisperx")
-        return {"transcripts": [], "errors": errors}
-
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
@@ -382,8 +376,27 @@ def transcribe(state: dict) -> dict:
         except Exception:
             pass
 
-    print(f"[transcribe] Loading whisperX model: {whisper_model_name} ({device}/{compute_type})")
-    model = whisperx.load_model(whisper_model_name, device, compute_type=compute_type, language="zh")
+    # Try whisperx first; fall back to faster-whisper if torchaudio is broken
+    _use_whisperx = False
+    model = None
+    try:
+        import whisperx as _wx
+        model = _wx.load_model(whisper_model_name, device, compute_type=compute_type, language="zh")
+        _use_whisperx = True
+        print(f"[transcribe] Backend: whisperX ({whisper_model_name}, {device}/{compute_type})")
+    except Exception as exc:
+        print(f"[transcribe] whisperX unavailable ({exc.__class__.__name__}: {exc}), "
+              f"falling back to faster-whisper")
+
+    if not _use_whisperx:
+        try:
+            from faster_whisper import WhisperModel as _FWModel
+            _fw_compute = "float16" if device == "cuda" else "int8"
+            model = _FWModel(whisper_model_name, device=device, compute_type=_fw_compute)
+            print(f"[transcribe] Backend: faster-whisper ({whisper_model_name}, {device}/{_fw_compute})")
+        except Exception as exc:
+            errors.append(f"[transcribe] No transcription backend available: {exc}")
+            return {"transcripts": [], "errors": errors}
 
     transcripts_data = []
 
@@ -454,24 +467,33 @@ def transcribe(state: dict) -> dict:
             print(f"  [transcribe] Transcribing: {video_path.name}")
             try:
                 # Step 1: Whisper transcription
-                audio = whisperx.load_audio(str(audio_path))
-                result = model.transcribe(audio, batch_size=8, language="zh")
-                seg_count = len(result.get("segments", []))
-                print(f"  [transcribe] Whisper: {seg_count} segments detected")
+                if _use_whisperx:
+                    import whisperx as _wx2
+                    audio = _wx2.load_audio(str(audio_path))
+                    result = model.transcribe(audio, batch_size=8, language="zh")
+                    seg_count = len(result.get("segments", []))
+                    print(f"  [transcribe] WhisperX: {seg_count} segments detected")
+                    # Fallback: whisperX VAD may miss low-energy speech
+                    if seg_count == 0:
+                        print("  [transcribe] 0 segments — falling back to faster-whisper")
+                        from faster_whisper import WhisperModel as _FWModel
+                        fw_model = _FWModel(whisper_model_name, device="cpu", compute_type="int8")
+                        fw_segs, _ = fw_model.transcribe(str(audio_path), language="zh", beam_size=5)
+                        result = {"segments": [{"start": s.start, "end": s.end, "text": s.text} for s in fw_segs]}
+                        print(f"  [transcribe] Fallback: {len(result['segments'])} segments")
+                else:
+                    # faster-whisper direct mode
+                    fw_segs, fw_info = model.transcribe(str(audio_path), language="zh", beam_size=5)
+                    segments_list = [{"start": s.start, "end": s.end, "text": s.text} for s in fw_segs]
+                    result = {"segments": segments_list}
+                    print(f"  [transcribe] faster-whisper: {len(segments_list)} segments detected")
 
-                # Fallback: whisperX VAD may miss low-energy speech; use faster-whisper directly
-                if seg_count == 0:
-                    print("  [transcribe] 0 segments — falling back to faster-whisper")
-                    from faster_whisper import WhisperModel as _FWModel
-                    fw_model = _FWModel(whisper_model_name, device="cpu", compute_type="int8")
-                    fw_segs, fw_info = fw_model.transcribe(str(audio_path), language="zh", beam_size=5)
-                    result = {"segments": [{"start": s.start, "end": s.end, "text": s.text} for s in fw_segs]}
-                    print(f"  [transcribe] Fallback: {len(result['segments'])} segments")
-
-                # Step 2: Word-level alignment
+                # Step 2: Word-level alignment (whisperX only)
                 try:
-                    align_model, metadata = whisperx.load_align_model(language_code="zh", device=device)
-                    result = whisperx.align(result["segments"], align_model, metadata, audio, device)
+                    if _use_whisperx:
+                        import whisperx as _wx3
+                        align_model, metadata = _wx3.load_align_model(language_code="zh", device=device)
+                        result = _wx3.align(result["segments"], align_model, metadata, audio, device)
                 except Exception as e:
                     print(f"  [transcribe] Alignment skipped: {e}")
 

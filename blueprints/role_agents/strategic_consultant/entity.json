@@ -21,12 +21,32 @@
         "user_msg_prefix": "User: ",
         "tombstone_enabled": true,
         "tool_rules": []
+      },
+      {
+        "id": "grok_imagine",
+        "type": "GROK_IMAGINE",
+        "node_config": {
+          "chrome_profile_dir": "/home/kingy/Foundation/EdenGateway/bot-chrome-data",
+          "output_dir": "/home/kingy/Foundation/EdenGateway/grok_imagine_output",
+          "timeout": 300
+        }
       }
     ],
     "edges": [
       {
         "id": "e_start_2_grok",
         "from": "__start__",
+        "to": "grok_main"
+      },
+      {
+        "id": "e_grok_2_imagine",
+        "type": "routing_to",
+        "from": "grok_main",
+        "to": "grok_imagine"
+      },
+      {
+        "id": "e_imagine_2_grok",
+        "from": "grok_imagine",
         "to": "grok_main"
       },
       {

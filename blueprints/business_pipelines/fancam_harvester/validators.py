@@ -61,8 +61,6 @@ ALIGN_MIN_ACCEPT       = 0.10   # below this → unmatched
 AUDIO_CONF_REF         = 0.10   # reference baseline (logged, not gating)
 DINOV2_CONF_REF        = 0.50
 POSE_CONF_REF          = 0.55
-# If best confidence after parallel competition is below this, retry at 2x speed
-SLOWMO_RETRY_THRESHOLD = 0.65   # §5.2 参数调优记录
 # Offset deduplication: two clips are "same region" if their offsets are within this gap
 DEDUP_MIN_GAP_SEC      = 2.0    # §5.1 参数调优记录
 
@@ -792,16 +790,10 @@ def _make_speed_clip(clip_path: Path, factor: float = 2.0) -> Path | None:
 
 
 def _source_duration(source_path: Path) -> float:
-    """Return duration of source video in seconds via ffprobe/ffmpeg."""
-    import shutil as _sh
-    ff = _sh.which("ffprobe") or _sh.which("ffmpeg")
-    if not ff:
-        return 0.0
-    cmd = [ff, "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=noprint_wrappers=1:nokey=1", str(source_path)]
+    """Return duration of source video in seconds via _video_info()."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return float(r.stdout.strip())
+        info = _video_info(source_path)
+        return float(info.get("duration_sec", 0.0))
     except Exception:
         return 0.0
 
@@ -955,27 +947,51 @@ def _deduplicate_alignments(
                 "dedup: %s offset=%.2fs (source_win=%.2f-%.2fs) conflicts claimed — re-aligning",
                 ar.clip_id, ar.offset_sec, win_start, win_end,
             )
-            new_offset, new_conf = _run_dinov2_with_exclusions(
-                source_path=source_path,
-                clip_path=Path(next(
-                    r["local_path"] for r in clip_recs if r["clip_id"] == ar.clip_id
-                )),
-                excluded_ranges=claimed,
-                source_duration=src_dur,
-            )
-            if new_conf >= ALIGN_MIN_ACCEPT:
+            clip_local = Path(next(
+                r["local_path"] for r in clip_recs if r["clip_id"] == ar.clip_id
+            ))
+
+            # Try 1x first, then 2x (same slowmo retry logic as main align)
+            candidates_dedup: list[tuple[float, float, str]] = []
+            for dedup_factor, dedup_method in [(1.0, "dinov2_dedup"), (2.0, "dinov2_dedup_2x")]:
+                clip_for_dedup = clip_local
+                tmp_fast: Path | None = None
+                if dedup_factor == 2.0:
+                    tmp_fast = _make_speed_clip(clip_local, factor=2.0)
+                    if tmp_fast:
+                        clip_for_dedup = tmp_fast
+                    else:
+                        continue
+                try:
+                    off, conf = _run_dinov2_with_exclusions(
+                        source_path=source_path,
+                        clip_path=clip_for_dedup,
+                        excluded_ranges=claimed,
+                        source_duration=src_dur,
+                    )
+                    candidates_dedup.append((off, conf, dedup_method))
+                except Exception as e:
+                    logger.debug("dedup factor=%.1f failed: %s", dedup_factor, e)
+                finally:
+                    if tmp_fast:
+                        tmp_fast.unlink(missing_ok=True)
+
+            # Pick best — no threshold, always take highest conf result
+            if candidates_dedup:
+                candidates_dedup.sort(key=lambda x: x[1], reverse=True)
+                new_offset, new_conf, new_method = candidates_dedup[0]
                 new_win = (new_offset, new_offset + source_coverage)
                 claimed.append(new_win)
                 logger.info(
-                    "dedup: %s → new offset=%.2fs conf=%.3f",
-                    ar.clip_id, new_offset, new_conf,
+                    "dedup: %s → offset=%.2fs conf=%.3f method=%s",
+                    ar.clip_id, new_offset, new_conf, new_method,
                 )
                 result.append(AlignRecord(
                     clip_id=ar.clip_id,
                     source_clip_id=ar.source_clip_id,
                     offset_sec=new_offset,
                     confidence=new_conf,
-                    method="dinov2_dedup",
+                    method=new_method,
                     error="",
                     audio_conf=ar.audio_conf,
                     dinov2_conf=new_conf,
@@ -988,7 +1004,7 @@ def _deduplicate_alignments(
                     offset_sec=0.0,
                     confidence=0.0,
                     method="unmatched",
-                    error="dedup: no non-overlapping region found",
+                    error="dedup: re-alignment failed",
                     audio_conf=ar.audio_conf,
                     dinov2_conf=ar.dinov2_conf,
                     pose_conf=ar.pose_conf,
@@ -1031,6 +1047,25 @@ def align(state: dict) -> dict:
     slowmo_info: dict = json.loads(state.get("slowmo_info", "{}"))
     errors: list[str] = json.loads(state.get("errors", "[]"))
     alignments: list[AlignRecord] = []
+
+    # ── Pre-import all pulsify.align modules in main thread ──────────────────
+    # ThreadPoolExecutor workers can hold Python's per-module _ModuleLock when
+    # they first import a module.  If the main thread then tries to import the
+    # same module (e.g. during dedup) it deadlocks waiting for the lock.
+    # Importing everything here, before any executor starts, guarantees the
+    # modules are fully in sys.modules and the locks are released.
+    try:
+        from pulsify.align.dinov2_align import dinov2_find_offset as _  # noqa: F401
+    except Exception:
+        pass
+    try:
+        from pulsify.align.motion_align import find_offset as _  # noqa: F401
+    except Exception:
+        pass
+    try:
+        from align.audio_fingerprint import find_offset as _  # noqa: F401
+    except Exception:
+        pass
 
     # Build lookup: post_id → source records and clip records
     sources_by_post: dict[str, list[dict]] = {}
@@ -1107,42 +1142,43 @@ def align(state: dict) -> dict:
                 except Exception as e:
                     logger.debug("pose future error: %s", e)
 
-            # ── Select winner: highest confidence ──
-            candidates = [
+            # ── Step 1: pick best 1x result ──────────────────────────────────
+            candidates_1x = [
                 ("audio",  audio_result[0],  audio_result[1]),
                 ("dinov2", dinov2_result[0], dinov2_result[1]),
                 ("pose",   pose_result[0],   pose_result[1]),
             ]
-            # Sort by confidence descending
-            candidates.sort(key=lambda x: x[2], reverse=True)
-            best_method, best_offset, best_conf = candidates[0]
+            candidates_1x.sort(key=lambda x: x[2], reverse=True)
+            best_method_1x, best_offset_1x, best_conf_1x = candidates_1x[0]
 
-            # ── Slowmo retry: if best conf is low, try 2x speed DINOv2 ──────
-            # Don't rely on slowmo_detect (FPS/BPM detection unreliable for
-            # clips without audio or with frame-duplication slowmo).
-            # If the 1x alignment is weak, speed up the clip 2x with ffmpeg
-            # and re-run DINOv2. Keep whichever is better.
-            if ALIGN_MIN_ACCEPT <= best_conf < SLOWMO_RETRY_THRESHOLD:
-                fast_clip = _make_speed_clip(clip_path, factor=2.0)
-                if fast_clip:
-                    try:
-                        r2x_offset, r2x_conf = _run_dinov2_align(source_path, fast_clip)
-                        logger.info(
-                            "slowmo-retry 2x: %s  conf %.3f → %.3f",
-                            cr["clip_id"], best_conf, r2x_conf,
-                        )
-                        if r2x_conf > best_conf:
-                            best_method = "dinov2_2x"
-                            best_offset = r2x_offset
-                            best_conf   = r2x_conf
-                            dinov2_result = (r2x_offset, r2x_conf)
-                    except Exception as e:
-                        logger.debug("slowmo-retry failed: %s", e)
-                    finally:
-                        try:
-                            fast_clip.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+            # ── Step 2: always run 2x DINOv2 (slowmo detection via comparison)
+            # Both 1x and 2x are always evaluated; whichever scores higher wins.
+            # No threshold gate — comparison alone determines slowmo status.
+            r2x_offset, r2x_conf = 0.0, 0.0
+            fast_clip = _make_speed_clip(clip_path, factor=2.0)
+            if fast_clip:
+                try:
+                    r2x_offset, r2x_conf = _run_dinov2_align(source_path, fast_clip)
+                    logger.info(
+                        "align 2x: %s  1x_conf=%.3f  2x_conf=%.3f",
+                        cr["clip_id"], best_conf_1x, r2x_conf,
+                    )
+                except Exception as e:
+                    logger.debug("2x align failed: %s", e)
+                finally:
+                    fast_clip.unlink(missing_ok=True)
+
+            # ── Step 3: compare 1x vs 2x → pick winner ───────────────────────
+            if r2x_conf > best_conf_1x:
+                # 2x wins → clip is slowmo
+                best_method = "dinov2_2x"
+                best_offset = r2x_offset
+                best_conf   = r2x_conf
+                dinov2_result = (r2x_offset, r2x_conf)
+            else:
+                best_method = best_method_1x
+                best_offset = best_offset_1x
+                best_conf   = best_conf_1x
 
             if best_conf < ALIGN_MIN_ACCEPT:
                 best_method = "unmatched"

@@ -17,7 +17,6 @@
         "type": "CLAUDE_SDK",
         "extra_persona": true,
         "persona_files": ["./ROLE.md", "./PROTOCOL.md"],
-        "model": null,
         "tools": [
           "Read",
           "Write",

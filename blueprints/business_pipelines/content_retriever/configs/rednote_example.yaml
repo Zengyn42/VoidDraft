@@ -2,13 +2,13 @@ source:
   type: rednote
   account_user_id: 60b6bf360000000001007c35   # 账号 ID（从 profile URL 里取）
   mode: favorites       # favorites=收藏 | posted=发布 | target_url | search
-  max_scroll: 80        # 滚动次数（200个视频约需80次）
+  max_scroll: 200       # 滚动次数（800个视频约需200次）
   request_delay: 1.5    # 每个帖子间隔秒数
   video_only: true      # 只收集视频帖（跳过图文）
   credentials_file: kknd2024.json   # EdenGateway/rednote/accounts/ 下的账号文件
 
 download_dir: /home/kingy/Foundation/EdenGateway/rednote_downloads
-max_posts: 500
+max_posts: 800
 analyzer: none          # 视频转文字走 transcribe 节点，不用视觉 analyzer
 analyze_model:
 frame_interval: 10
