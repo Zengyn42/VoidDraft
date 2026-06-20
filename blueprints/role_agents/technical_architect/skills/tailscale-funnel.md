@@ -81,6 +81,42 @@ Frontend WS auto-connects via `wss://kingy.taile5f3af.ts.net/ws` — no config n
 
 ---
 
+## Share Media Files (Videos, Images)
+
+When a result file (video, image, audio) is too large for Discord, use `media_share` to generate a public preview page:
+
+```bash
+# Share a single file
+python3 -m framework.media_share /path/to/video.mp4
+
+# Share multiple files with a custom title
+python3 -m framework.media_share --title "Generation Results" /path/to/v1.mp4 /path/to/v2.mp4
+
+# Output (stdout): https://kingy.taile5f3af.ts.net/share/a1b2c3d4/
+```
+
+The tool auto-starts an HTTP server on port 8091 if needed. Files are symlinked (not copied), so large files are instant.
+
+Requires Tailscale Funnel path: `tailscale funnel --bg --set-path /share localhost:8091` (one-time setup, PowerShell Admin).
+
+### Managing Shares
+
+```bash
+# List all active shares
+python3 -m framework.media_share --cleanup
+
+# Remove a specific share
+python3 -m framework.media_share --remove <uuid>
+
+# Remove all shares
+python3 -m framework.media_share --cleanup --all
+```
+
+Share directory: `/home/kingy/Foundation/EdenGateway/share/`
+Files persist until manually cleaned.
+
+---
+
 ## Quick Checklist
 
 - [ ] Python HTTP server running in WSL on target port
