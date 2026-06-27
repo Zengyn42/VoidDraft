@@ -108,10 +108,57 @@ echo "Preview: $URL"
 | Audio | `.mp3` `.wav` `.ogg` `.flac` `.m4a` | `<audio>` player |
 | Other | any | Download link |
 
+## Architecture & Design Decisions
+
+### Why Copy Instead of Symlink
+
+Files are **copied** into the share directory, not symlinked. This ensures:
+- Share links remain valid even if the original file is moved, deleted, or overwritten
+- Each share is a self-contained snapshot — no broken links weeks later
+- Trade-off: uses more disk, but persistence is worth it for a knowledge archive
+
+### Why Starlette Instead of http.server
+
+The share server (`framework/share_server.py`) uses Starlette + uvicorn instead of Python's built-in `http.server` because:
+- **HTTP Range requests**: `http.server` does NOT support `Range` headers. Without Range support, browsers cannot seek/scrub through video files — playback is start-to-finish only. Starlette's `StaticFiles` returns `206 Partial Content` with proper `Content-Range` headers, enabling free video seeking.
+- **Proper MIME types**: Automatic content-type detection for all media formats.
+- **Async I/O**: Non-blocking file serving, handles concurrent requests without threading issues.
+
+### Network Topology (WSL2 + Tailscale)
+
+```
+Browser (anywhere) 
+  → https://kingy.taile5f3af.ts.net/share/...  (Tailscale Funnel, HTTPS)
+  → Windows host receives on port 443
+  → Funnel proxies to localhost:8091
+  → WSL2 share_server (Starlette) on 127.0.0.1:8091
+  → Reads files from EdenGateway/share/
+```
+
+Key points:
+- `tailscale` runs on **Windows**, not WSL. All `tailscale` commands must run in **Windows PowerShell (Admin)**.
+- The share_server binds to `127.0.0.1` — accessible from Windows via localhost (WSL2 port forwarding), but not directly from LAN.
+- Funnel provides HTTPS termination — no cert management needed.
+- The root URL `/share/` returns 404 (no directory listing). Only specific share paths work. This is intentional — no browsing of all shares.
+
+### Project-Based Organization
+
+Shares are grouped by project name (`--project`) to keep the archive navigable:
+- Each project gets its own subdirectory under `EdenGateway/share/`
+- Within a project, each share gets a unique 8-char hex ID
+- The `context.md` file alongside media files serves as a plain-text backup of the background knowledge, separate from the HTML
+
+### Server Lifecycle
+
+- The share_server is auto-started by `media_share.py` when not already running
+- It runs as a detached background process (PID saved to `.server.pid`)
+- If the server dies (reboot, crash), the next `media_share` call restarts it automatically
+- The Tailscale Funnel path (`/share → localhost:8091`) is a one-time Windows-side configuration that persists across reboots
+
 ## Prerequisites
 
-- HTTP server on port 8091 is auto-started when needed
-- Tailscale Funnel path must be configured once (PowerShell Admin):
+- Starlette + uvicorn installed (both in requirements.txt)
+- Tailscale Funnel path configured once (PowerShell Admin):
   ```powershell
   tailscale funnel --bg --set-path /share localhost:8091
   ```
